@@ -22,13 +22,11 @@ jobs:
 
       - name: Comprobar señales y avisar si algo cambió
         env:
-          # --- Configuración de la estrategia: edita estos valores a tu gusto ---
           SYMBOL: 'BTCUSDT'
-          STRATEGY: 'base'                 # 'base' o 'pro'
+          STRATEGY: 'base'
           KONCORDE_FILTER: 'true'
           ENHANCED_FILTER: 'false'
           REINFORCED_DAILY_GATE: 'false'
-          # --- Credenciales de Telegram: NO se ponen aquí, se leen de Settings → Secrets ---
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: node bitman-telegram-bot.js
