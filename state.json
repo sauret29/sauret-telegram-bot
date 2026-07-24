@@ -1,0 +1,16 @@
+{
+  "symbol": "BTCUSDT",
+  "verdicts": {
+    "W": "ESPERAR",
+    "D": "VENDER",
+    "H4": "VENDER",
+    "H1": "ESPERAR"
+  },
+  "warnings": {
+    "W": true,
+    "D": true,
+    "H4": true,
+    "H1": true
+  },
+  "lastCheck": "2026-07-24T10:18:50.370Z"
+}
