@@ -4,13 +4,13 @@
     "W": "ESPERAR",
     "D": "VENDER",
     "H4": "VENDER",
-    "H1": "ESPERAR"
+    "H1": "VENDER"
   },
   "warnings": {
     "W": true,
     "D": true,
-    "H4": true,
+    "H4": false,
     "H1": true
   },
-  "lastCheck": "2026-07-24T10:18:50.370Z"
+  "lastCheck": "2026-07-24T16:58:05.755Z"
 }
