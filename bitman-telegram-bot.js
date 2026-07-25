@@ -738,13 +738,27 @@ function saveState(state){
 }
 
 // ---------- Programa principal ----------
+// Calcula y avisa SIEMPRE con las dos estrategias en paralelo (Base y Pro),
+// diferenciadas en el mensaje de Telegram con una etiqueta [Base] / [Pro].
+// La variable de entorno STRATEGY ya no elige una sola estrategia: se deja
+// solo por compatibilidad y aparece en el log informativo si está definida.
+const STRATEGIES = ['base', 'pro'];
+const STRATEGY_LABEL = { base: 'Base', pro: 'Pro' };
+
 async function main(){
   const now = new Date();
   console.log('Bitman Bot — comprobando ' + SYMBOL + ' a las ' + now.toISOString());
-  console.log('Estrategia: ' + STRATEGY + ' · Koncorde>media: ' + KONCORDE_FILTER + ' · Confirmación reforzada: ' + ENHANCED_FILTER + ' · Puerta diaria reforzada: ' + REINFORCED_DAILY_GATE);
+  console.log('Estrategias: Base + Pro (en paralelo) · Koncorde>media: ' + KONCORDE_FILTER + ' · Confirmación reforzada: ' + ENHANCED_FILTER + ' · Puerta diaria reforzada: ' + REINFORCED_DAILY_GATE);
 
   const prevState = loadState();
   const sameSymbol = prevState.symbol === SYMBOL;
+  // Compatibilidad con el formato de estado anterior (una sola estrategia):
+  // si el state.json es del formato viejo, se trata como si no hubiera datos
+  // previos para esa estrategia, así no se envían avisos falsos al migrar.
+  const prevVerdictsByStrategy = (prevState.verdicts && prevState.verdicts.base && prevState.verdicts.pro)
+    ? prevState.verdicts
+    : { base: {}, pro: {} };
+  const prevWarnings = prevState.warnings || {};
 
   const rawResults = {};
   for(const tf of TIMEFRAMES){
@@ -758,15 +772,17 @@ async function main(){
     }
   }
 
+  // La puerta diaria (filtro de tendencia del modo Pro) se calcula siempre,
+  // independientemente de si luego se usa (solo la consume la estrategia Pro).
   const dailySeries = rawResults['D'];
   let gateH4 = null, gateH1 = null;
-  if(dailySeries && STRATEGY === 'pro'){
+  if(dailySeries){
     if(rawResults['H4']) gateH4 = computeDailyGateArrays(dailySeries, rawResults['H4'].times, REINFORCED_DAILY_GATE, DAILY_SUSTAIN_BARS);
     if(rawResults['H1']) gateH1 = computeDailyGateArrays(dailySeries, rawResults['H1'].times, REINFORCED_DAILY_GATE, DAILY_SUSTAIN_BARS);
   }
 
   const messages = [];
-  const newVerdicts = {};
+  const newVerdicts = { base: {}, pro: {} };
   const newWarnings = {};
 
   TIMEFRAMES.forEach(tf=>{
@@ -777,21 +793,33 @@ async function main(){
     const last = s.n - 1;
     const gateBullishLast = gate ? !!gate.bullish[last] : false;
     const gateBearishLast = gate ? !!gate.bearish[last] : false;
-    const cv = computeCardVerdict(tf.key, s, gateBullishLast, gateBearishLast, STRATEGY, KONCORDE_FILTER, ENHANCED_FILTER);
-    newVerdicts[tf.key] = cv.verdict;
 
+    // La alerta temprana (divergencias) no depende de la estrategia: se calcula una vez.
     const divergences = detectDivergences(s, 8);
     const warning = computeEarlyExitWarning(s, last, divergences);
     newWarnings[tf.key] = warning.active;
 
-    console.log('  ' + tf.label + ' → ' + cv.verdict + (warning.active ? ' (⚠️ aviso activo, dirección ' + warning.direction + ')' : ''));
+    let logLine = '  ' + tf.label + ' →';
 
-    if(sameSymbol){
-      const prevVerdict = prevState.verdicts ? prevState.verdicts[tf.key] : undefined;
-      if(prevVerdict && prevVerdict !== cv.verdict){
-        messages.push('🔔 <b>' + tf.label + '</b>: ' + prevVerdict + ' → <b>' + cv.verdict + '</b>\n' + escapeHtml(cv.motivo));
+    STRATEGIES.forEach(strategy=>{
+      const cv = computeCardVerdict(tf.key, s, gateBullishLast, gateBearishLast, strategy, KONCORDE_FILTER, ENHANCED_FILTER);
+      newVerdicts[strategy][tf.key] = cv.verdict;
+      logLine += ' [' + STRATEGY_LABEL[strategy] + ': ' + cv.verdict + ']';
+
+      if(sameSymbol){
+        const prevVerdict = prevVerdictsByStrategy[strategy] ? prevVerdictsByStrategy[strategy][tf.key] : undefined;
+        if(prevVerdict && prevVerdict !== cv.verdict){
+          messages.push('🔔 <b>[' + STRATEGY_LABEL[strategy] + '] ' + tf.label + '</b>: ' + prevVerdict + ' → <b>' + cv.verdict + '</b>\n' + escapeHtml(cv.motivo));
+        }
       }
-      const wasWarning = prevState.warnings ? !!prevState.warnings[tf.key] : false;
+    });
+
+    console.log(logLine + (warning.active ? ' (⚠️ aviso activo, dirección ' + warning.direction + ')' : ''));
+
+    // La alerta de retroceso/rebote se envía una sola vez por temporalidad
+    // (es la misma para las dos estrategias, no es exclusiva de ninguna).
+    if(sameSymbol){
+      const wasWarning = !!prevWarnings[tf.key];
       if(warning.active && !wasWarning){
         const dirLabel = warning.direction === 'bajista' ? 'Alerta de posible rebote' : 'Alerta de retroceso';
         messages.push('⚠️ <b>' + tf.label + '</b> — ' + dirLabel + '\n' + escapeHtml(warning.reasons.join(' · ')));
