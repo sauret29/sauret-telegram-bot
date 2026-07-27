@@ -17,7 +17,7 @@
 // Los resultados se imprimen en el log de esta ejecución.
 // ============================================================
 
-const MESES_HISTORICO = 6;
+const MESES_HISTORICO = parseInt(process.env.MESES_HISTORICO || '6', 10);
 const LEVERAGE = 5;
 const SL_DEFAULT_PCT = 5;   // %
 const TP_DEFAULT_PCT = 15;  // %
@@ -60,7 +60,7 @@ async function fetchCandlesForMonths(interval, months, warmupMargin){
   const targetCandles = monthsCandles + warmupMargin;
   let all = await fetchKlinesRaw(interval, SIGNAL_LIMIT);
   let pages = 1;
-  while(all.length < targetCandles && pages < 15){
+  while(all.length < targetCandles && pages < 150){
     const oldestOpenTime = all[0][0];
     let nextPage;
     try{ nextPage = await fetchKlinesRaw(interval, SIGNAL_LIMIT, oldestOpenTime-1); }
