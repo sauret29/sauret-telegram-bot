@@ -565,6 +565,19 @@ function verdictAtVariant(s, i, variant, mlSignal, gates){
     const cuatroHBearish = gates && gates.bear4Full[i];
     comprarOk = dailyBullish && cuatroHBullish && aoAlcista && adxSubiendo && koBull;
     venderOk  = dailyBearish && cuatroHBearish && aoBajista && adxSubiendo && koBear;
+  } else if(variant==='pullback_4h_1h'){
+    // Diario marca la tendencia principal. El 4H tiene que estar EN CONTRA
+    // de esa tendencia (un retroceso/pullback dentro del movimiento mayor).
+    // El 1H tiene que dar su señal completa a favor del Diario otra vez
+    // (el "impulso contrario" al retroceso del 4H) — ese giro del 1H suele
+    // marcar el momento en que el retroceso del 4H se agota y el precio
+    // retoma la tendencia principal.
+    const dailyBullish = gates && gates.bullD[i];
+    const dailyBearish = gates && gates.bearD[i];
+    const cuatroHEnRetrocesoBajista = gates && gates.bear4[i]; // 4H bajista dentro de tendencia diaria alcista
+    const cuatroHEnRetrocesoAlcista = gates && gates.bull4[i]; // 4H alcista dentro de tendencia diaria bajista
+    comprarOk = dailyBullish && cuatroHEnRetrocesoBajista && aoAlcista && adxSubiendo && koBull;
+    venderOk  = dailyBearish && cuatroHEnRetrocesoAlcista && aoBajista && adxSubiendo && koBear;
   }
 
   let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
@@ -760,7 +773,8 @@ async function main(){
     {key:'adx_no_bajando',         label:'ADX no cayendo'},
     {key:'ml_rsi',                 label:'ML RSI en vez de ADX'},
     {key:'confluencia_htf',        label:'Confluencia 1H+(4H o Diario)'},
-    {key:'cascada_diario_4h_1h',   label:'Cascada Diario→4H→1H'}
+    {key:'cascada_diario_4h_1h',   label:'Cascada Diario→4H→1H'},
+    {key:'pullback_4h_1h',         label:'Retroceso 4H + giro 1H'}
   ];
 
   const resultadosA = variantes.map(v=>{
