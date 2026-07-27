@@ -748,9 +748,9 @@ async function main(){
   });
 
   // C3: SL más ajustado que el probado en el Análisis B (que solo bajaba hasta -3%)
-  console.log('\n--- C3: Stop Loss más ajustado (Confluencia OR, TP +15%, ' + LEVERAGE + 'x) ---');
+  console.log('\n--- C3: Stop Loss afinado entre -2% y -2.5% (Confluencia OR, TP +15%, ' + LEVERAGE + 'x) ---');
   console.log(pad('SL',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
-  [1,1.5,2,2.5,3,4,5].forEach(sl=>{
+  [2.0,2.1,2.2,2.3,2.4,2.5].forEach(sl=>{
     const r = simulateTrades(s, verdictsActual, sl, TP_DEFAULT_PCT, LEVERAGE);
     const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
     console.log(pad('-'+sl+'%',8) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
