@@ -681,11 +681,11 @@ async function main(){
 
   // ---------- ANÁLISIS B: barrido de SL/TP ----------
   console.log('\n\n========================================');
-  console.log('ANÁLISIS B — Barrido de Stop Loss / Take Profit (lógica ADX estricto = la actual del bot en vivo, ' + LEVERAGE + 'x)');
+  console.log('ANÁLISIS B — Barrido de Stop Loss / Take Profit (lógica: Confluencia 1H+(4H o Diario), ' + LEVERAGE + 'x)');
   console.log('========================================');
 
   const verdictsActual = new Array(s.n).fill('ESPERAR');
-  for(let i=1;i<s.n;i++) verdictsActual[i] = verdictAtVariant(s, i, 'adx_estricto', mlSignal, gates);
+  for(let i=1;i<s.n;i++) verdictsActual[i] = verdictAtVariant(s, i, 'confluencia_htf', mlSignal, gates);
 
   const slOptions = [3, 5, 7, 10];
   const tpOptions = [10, 15, 20, 25, 30];
