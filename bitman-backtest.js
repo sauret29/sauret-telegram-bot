@@ -620,6 +620,76 @@ function simulateTrades(s, verdicts, slPct, tpPct, leverage){
   };
 }
 
+// Igual que simulateTrades, pero en vez de usar SIEMPRE el 100% de la cuenta
+// como margen, solo arriesga un % FIJO del capital total en cada operación
+// (position sizing). El apalancamiento (leverage) se mantiene igual —
+// se aplica dentro de la porción de capital arriesgada, no se toca — pero
+// como esa porción es mucho más pequeña que el 100%, una racha de pérdidas
+// consecutivas erosiona la cuenta mucho más despacio.
+//   marginFraction = riskPct / (slPct * leverage)   (nunca más del 100%)
+function simulateTradesRiskSized(s, verdicts, slPct, tpPct, leverage, riskPct){
+  const n = s.n;
+  let equity = 1.0, peak = 1.0, maxDrawdown = 0;
+  let position = null;
+  let entryPrice = null, slPrice = null, tpPrice = null;
+  const trades = [];
+
+  // Fracción del capital total que se arriesga en cada operación, calculada
+  // para que, si salta el SL, la pérdida sea exactamente 'riskPct' de la cuenta.
+  const marginFraction = Math.min(1, (riskPct/100) / ((slPct/100) * leverage));
+
+  const closeTrade = (exitPrice, reason) => {
+    const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
+    const leveraged = rawReturn * leverage;
+    // Solo la porción 'marginFraction' de la cuenta participa en este resultado;
+    // el resto del capital se queda intacto, sin exponerse a esta operación.
+    const equityChange = marginFraction * leveraged;
+    equity *= Math.max(0, 1 + equityChange);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
+    trades.push({ direction:position, entryPrice, exitPrice, returnPct:leveraged*100, equityChangePct:equityChange*100, reason });
+    position = null; entryPrice = null; slPrice = null; tpPrice = null;
+  };
+
+  for(let i=1;i<n;i++){
+    if(position){
+      const hitSL = position==='long' ? s.lows[i] <= slPrice : s.highs[i] >= slPrice;
+      const hitTP = position==='long' ? s.highs[i] >= tpPrice : s.lows[i] <= tpPrice;
+      if(hitSL){ closeTrade(slPrice, 'SL'); }
+      else if(hitTP){ closeTrade(tpPrice, 'TP'); }
+      else {
+        const v = verdicts[i];
+        const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+        if(!stillValid) closeTrade(s.closes[i], 'Cambio de veredicto');
+      }
+    }
+    if(!position){
+      const v = verdicts[i];
+      if(v==='COMPRAR'){
+        position='long'; entryPrice=s.closes[i];
+        slPrice = entryPrice*(1-slPct/100); tpPrice = entryPrice*(1+tpPct/100);
+      } else if(v==='VENDER'){
+        position='short'; entryPrice=s.closes[i];
+        slPrice = entryPrice*(1+slPct/100); tpPrice = entryPrice*(1-tpPct/100);
+      }
+    }
+  }
+  if(position) closeTrade(s.closes[n-1], 'Fin del periodo');
+
+  const wins = trades.filter(t=>t.equityChangePct>0).length;
+  const grossGain = trades.filter(t=>t.equityChangePct>0).reduce((a,t)=>a+t.equityChangePct,0);
+  const grossLoss = Math.abs(trades.filter(t=>t.equityChangePct<=0).reduce((a,t)=>a+t.equityChangePct,0));
+  return {
+    trades: trades.length,
+    winRatePct: trades.length ? (wins/trades.length*100) : 0,
+    totalReturnPct: (equity-1)*100,
+    maxDrawdownPct: maxDrawdown*100,
+    avgReturnPerTradePct: trades.length ? (trades.reduce((a,t)=>a+t.equityChangePct,0)/trades.length) : 0,
+    profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0),
+    marginFractionPct: marginFraction*100
+  };
+}
+
 function pad(str, len){ str=String(str); return str.length>=len ? str : str + ' '.repeat(len-str.length); }
 function padL(str, len){ str=String(str); return str.length>=len ? str : ' '.repeat(len-str.length) + str; }
 function fmtPct(n){ return (n>=0?'+':'') + n.toFixed(2) + '%'; }
@@ -754,6 +824,21 @@ async function main(){
     const r = simulateTrades(s, verdictsActual, sl, TP_DEFAULT_PCT, LEVERAGE);
     const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
     console.log(pad('-'+sl+'%',8) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
+  // ---------- ANÁLISIS E: position sizing por riesgo fijo (sin tocar el apalancamiento) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS E — Arriesgar solo un % fijo de la cuenta por operación (leverage se mantiene en ' + LEVERAGE + 'x, SL -5% / TP +15%)');
+  console.log('========================================');
+  console.log('En vez de usar el 100% del capital en cada operación, solo se arriesga el % indicado');
+  console.log('de la cuenta total por operación (el resto queda protegido, sin exponerse). El');
+  console.log('apalancamiento sigue siendo ' + LEVERAGE + 'x dentro de esa porción arriesgada — no se toca.');
+
+  console.log('\n' + pad('% arriesgado',14) + padL('% del capital usado',20) + padL('Operac.',9) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [0.5,1,2,3,5,10,25,50,100].forEach(riskPct=>{
+    const r = simulateTradesRiskSized(s, verdictsActual, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE, riskPct);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(riskPct+'%',14) + padL(r.marginFractionPct.toFixed(1)+'%',20) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
   });
 
   console.log('\n=== Fin del backtest ===');
