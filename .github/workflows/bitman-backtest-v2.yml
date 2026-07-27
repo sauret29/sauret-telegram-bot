@@ -1,0 +1,21 @@
+name: Bitman Backtest v2 (manual)
+
+"on":
+  workflow_dispatch:   # solo se lanza a mano desde la pestaña Actions, nunca automático
+
+jobs:
+  run-backtest-v2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Ejecutar backtest v2 (puede tardar 2-3 minutos)
+        env:
+          SYMBOL: 'BTCUSDT'
+        run: node bitman-backtest-v2.js
