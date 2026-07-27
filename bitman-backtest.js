@@ -466,17 +466,22 @@ function buildConfluenceGates(series1H, series4H, seriesD){
   const n = series1H.n;
   const bull4 = new Array(n).fill(false), bear4 = new Array(n).fill(false);
   const bullD = new Array(n).fill(false), bearD = new Array(n).fill(false);
+  // Señal COMPLETA del 4H (con ADX incluido, no solo AO+Koncorde) — se usa
+  // como generador de entradas propio en la variante "cascada" (Diario→4H→1H).
+  const bull4Full = new Array(n).fill(false), bear4Full = new Array(n).fill(false);
   for(let i=0;i<n;i++){
     const i4 = idx4H[i], iD = idxD[i];
     bull4[i] = i4>=0 && series4H.aoState[i4]==='Alcista' && series4H.koBull[i4];
     bear4[i] = i4>=0 && series4H.aoState[i4]==='Bajista' && series4H.koBear[i4];
     bullD[i] = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
     bearD[i] = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+    bull4Full[i] = i4>=0 && series4H.aoState[i4]==='Alcista' && series4H.adxSubiendo[i4] && series4H.koBull[i4];
+    bear4Full[i] = i4>=0 && series4H.aoState[i4]==='Bajista' && series4H.adxSubiendo[i4] && series4H.koBear[i4];
   }
   // 'bullish'/'bearish' (con OR) se mantienen para no romper la variante ya usada.
   const bullish = bull4.map((v,i)=>v||bullD[i]);
   const bearish = bear4.map((v,i)=>v||bearD[i]);
-  return {bullish, bearish, bull4, bear4, bullD, bearD};
+  return {bullish, bearish, bull4, bear4, bullD, bearD, bull4Full, bear4Full};
 }
 
 
@@ -547,6 +552,19 @@ function verdictAtVariant(s, i, variant, mlSignal, gates){
     const gateBearishAnd = gates && gates.bear4[i] && gates.bearD[i];
     comprarOk = aoAlcista && adxSubiendo && koBull && gateBullishAnd;
     venderOk  = aoBajista && adxSubiendo && koBear && gateBearishAnd;
+  } else if(variant==='cascada_diario_4h_1h'){
+    // Diario marca la dirección permitida (tendencia principal, AO+Koncorde).
+    // 4H tiene que dar su PROPIA señal completa (AO+ADX+Koncorde) — es el
+    // que genera la entrada. 1H tiene que dar TAMBIÉN su propia señal
+    // completa — al esperar a que el 1H se alinee, la entrada llega más
+    // tarde que el simple disparo del 4H, lo cual de forma natural suele
+    // capturar un precio algo mejor (más ajustado) que entrar de inmediato.
+    const dailyBullish = gates && gates.bullD[i];
+    const dailyBearish = gates && gates.bearD[i];
+    const cuatroHBullish = gates && gates.bull4Full[i];
+    const cuatroHBearish = gates && gates.bear4Full[i];
+    comprarOk = dailyBullish && cuatroHBullish && aoAlcista && adxSubiendo && koBull;
+    venderOk  = dailyBearish && cuatroHBearish && aoBajista && adxSubiendo && koBear;
   }
 
   let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
@@ -737,11 +755,12 @@ async function main(){
   console.log('========================================');
 
   const variantes = [
-    {key:'adx_estricto',     label:'ADX estricto (actual)'},
-    {key:'sin_adx',          label:'Sin ADX (solo AO+Koncorde)'},
-    {key:'adx_no_bajando',   label:'ADX no cayendo'},
-    {key:'ml_rsi',           label:'ML RSI en vez de ADX'},
-    {key:'confluencia_htf',  label:'Confluencia 1H+(4H o Diario)'}
+    {key:'adx_estricto',           label:'ADX estricto (actual)'},
+    {key:'sin_adx',                label:'Sin ADX (solo AO+Koncorde)'},
+    {key:'adx_no_bajando',         label:'ADX no cayendo'},
+    {key:'ml_rsi',                 label:'ML RSI en vez de ADX'},
+    {key:'confluencia_htf',        label:'Confluencia 1H+(4H o Diario)'},
+    {key:'cascada_diario_4h_1h',   label:'Cascada Diario→4H→1H'}
   ];
 
   const resultadosA = variantes.map(v=>{
