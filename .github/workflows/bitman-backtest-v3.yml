@@ -1,0 +1,27 @@
+name: Bitman Backtest v3 - Tendencia 1H+4H, entrada 15M (manual)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      meses:
+        description: 'Meses de historico a analizar (a 15M, periodos largos tardan bastante mas)'
+        required: true
+        default: '6'
+
+jobs:
+  run-backtest-v3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Ejecutar backtest v3 (con 15M puede tardar varios minutos)
+        env:
+          SYMBOL: 'BTCUSDT'
+          MESES_HISTORICO: ${{ github.event.inputs.meses }}
+        run: node bitman-backtest-v3.js
