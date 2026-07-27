@@ -53,10 +53,10 @@ async function fetchKlinesRaw(interval, limit, endTime){
 // el PRIMER día del periodo analizado (no solo al final) — si no,
 // las primeras semanas del backtest usarían un ML RSI "mal calentado",
 // con menos historial del que tendría en una situación real.
-async function fetchCandlesForMonths(interval, months){
+async function fetchCandlesForMonths(interval, months, warmupMargin){
+  if(warmupMargin==null) warmupMargin = 3050; // por defecto, margen para el ML RSI (solo se usa en 1H)
   const msPerCandle = { '1h': 3600000, '4h': 14400000, '1d': 86400000 }[interval] || 3600000;
   const monthsCandles = Math.ceil((months * 30 * 86400000) / msPerCandle);
-  const warmupMargin = 3050; // > 3000 (ventana del ML RSI) con margen de seguridad
   const targetCandles = monthsCandles + warmupMargin;
   let all = await fetchKlinesRaw(interval, SIGNAL_LIMIT);
   let pages = 1;
@@ -441,9 +441,43 @@ function computeFullSeries(ohlcv){
   };
 }
 
-// ============================================================
-// SIMULADOR DE OPERACIONES (largo/corto, SL/TP fijo, apalancamiento)
-// ============================================================
+// Alinea una serie de temporalidad mayor (4H o Diario) contra los timestamps
+// de una serie menor (1H): para cada vela de 1H, devuelve el ÍNDICE de la
+// última vela de la temporalidad mayor que ya había cerrado en ese momento
+// (misma función que usa el bot en vivo para su puerta diaria del modo Pro).
+function alignDailyIndex(dailySeries, targetTimes){
+  const dTimes=dailySeries.times;
+  const out=new Array(targetTimes.length).fill(-1);
+  let j=0;
+  for(let i=0;i<targetTimes.length;i++){
+    while(j+1<dTimes.length && dTimes[j+1]<=targetTimes[i]) j++;
+    if(dTimes[j]<=targetTimes[i]) out[i]=j;
+  }
+  return out;
+}
+
+// Construye las "puertas" de confluencia: para cada vela de 1H, si la ÚLTIMA
+// vela cerrada de 4H o de Diario (la que sea) confirma tendencia alcista
+// (AO Alcista Y Koncorde>media), la puerta alcista queda abierta esa vela;
+// igual para bajista. Solo hace falta que UNA de las dos confirme (OR).
+function buildConfluenceGates(series1H, series4H, seriesD){
+  const idx4H = alignDailyIndex(series4H, series1H.times);
+  const idxD = alignDailyIndex(seriesD, series1H.times);
+  const n = series1H.n;
+  const bullish = new Array(n).fill(false);
+  const bearish = new Array(n).fill(false);
+  for(let i=0;i<n;i++){
+    const i4 = idx4H[i], iD = idxD[i];
+    const bull4 = i4>=0 && series4H.aoState[i4]==='Alcista' && series4H.koBull[i4];
+    const bear4 = i4>=0 && series4H.aoState[i4]==='Bajista' && series4H.koBear[i4];
+    const bullD = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+    const bearD = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+    bullish[i] = bull4 || bullD;
+    bearish[i] = bear4 || bearD;
+  }
+  return {bullish, bearish};
+}
+
 
 // Calcula el ML RSI para CADA vela de la serie (no solo la última),
 // necesario para poder simular la variante "ML RSI en vez de ADX"
@@ -477,7 +511,7 @@ function computeMLRSISeries(closes){
 // misma regla de cierre forzado por Koncorde (igual que el bot en
 // vivo) — lo único que cambia entre variantes es qué exige la
 // ENTRADA respecto al ADX (o su sustituto).
-function verdictAtVariant(s, i, variant, mlSignal){
+function verdictAtVariant(s, i, variant, mlSignal, gates){
   const aoAlcista = s.aoState[i]==='Alcista';
   const aoBajista = s.aoState[i]==='Bajista';
   const koBull = s.koBull[i], koBear = s.koBear[i];
@@ -485,6 +519,8 @@ function verdictAtVariant(s, i, variant, mlSignal){
   const adxNoBajando = !isNaN(s.adx[i]) && !isNaN(s.adx[i-1]) && s.adx[i] >= s.adx[i-1];
   const mlAlcista = mlSignal && mlSignal[i]==='Alcista';
   const mlBajista = mlSignal && mlSignal[i]==='Bajista';
+  const gateBullish = gates && gates.bullish[i];
+  const gateBearish = gates && gates.bearish[i];
 
   let comprarOk=false, venderOk=false;
   if(variant==='adx_estricto'){
@@ -499,6 +535,11 @@ function verdictAtVariant(s, i, variant, mlSignal){
   } else if(variant==='ml_rsi'){
     comprarOk = aoAlcista && mlAlcista && koBull;
     venderOk  = aoBajista && mlBajista && koBear;
+  } else if(variant==='confluencia_htf'){
+    // Igual que 'adx_estricto' en 1H, pero exige ADEMÁS que 4H o Diario
+    // (con que uno de los dos, vale) confirmen la misma tendencia.
+    comprarOk = aoAlcista && adxSubiendo && koBull && gateBullish;
+    venderOk  = aoBajista && adxSubiendo && koBear && gateBearish;
   }
 
   let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
@@ -579,11 +620,19 @@ function fmtPct(n){ return (n>=0?'+':'') + n.toFixed(2) + '%'; }
 async function main(){
   console.log('=== Bitman Backtest ===');
   console.log('Símbolo: ' + SYMBOL + ' · Temporalidad: 1H · Periodo: últimos ' + MESES_HISTORICO + ' meses · Apalancamiento: ' + LEVERAGE + 'x');
-  console.log('Descargando velas...');
+  console.log('Descargando velas 1H...');
   const ohlcv = await fetchCandlesForMonths('1h', MESES_HISTORICO);
-  console.log('Velas descargadas: ' + ohlcv.closes.length + ' (desde ' + new Date(ohlcv.times[0]).toISOString() + ' hasta ' + new Date(ohlcv.times[ohlcv.times.length-1]).toISOString() + ')');
+  console.log('Velas 1H descargadas: ' + ohlcv.closes.length + ' (desde ' + new Date(ohlcv.times[0]).toISOString() + ' hasta ' + new Date(ohlcv.times[ohlcv.times.length-1]).toISOString() + ')');
+
+  console.log('Descargando velas 4H y Diario (para la puerta de confluencia)...');
+  const ohlcv4H = await fetchCandlesForMonths('4h', MESES_HISTORICO, 300);
+  const ohlcvD  = await fetchCandlesForMonths('1d', MESES_HISTORICO, 300);
+  console.log('Velas 4H: ' + ohlcv4H.closes.length + ' · Velas Diario: ' + ohlcvD.closes.length);
 
   const s = computeFullSeries(ohlcv);
+  const s4H = computeFullSeries(ohlcv4H);
+  const sD = computeFullSeries(ohlcvD);
+  const gates = buildConfluenceGates(s, s4H, sD);
 
   // Recortamos el análisis a los últimos MESES_HISTORICO meses reales
   // (las velas de más son solo warmup para que los indicadores y el
@@ -611,15 +660,16 @@ async function main(){
   console.log('========================================');
 
   const variantes = [
-    {key:'adx_estricto',    label:'ADX estricto (actual)'},
-    {key:'sin_adx',         label:'Sin ADX (solo AO+Koncorde)'},
-    {key:'adx_no_bajando',  label:'ADX no cayendo'},
-    {key:'ml_rsi',          label:'ML RSI en vez de ADX'}
+    {key:'adx_estricto',     label:'ADX estricto (actual)'},
+    {key:'sin_adx',          label:'Sin ADX (solo AO+Koncorde)'},
+    {key:'adx_no_bajando',   label:'ADX no cayendo'},
+    {key:'ml_rsi',           label:'ML RSI en vez de ADX'},
+    {key:'confluencia_htf',  label:'Confluencia 1H+(4H o Diario)'}
   ];
 
   const resultadosA = variantes.map(v=>{
     const verdicts = new Array(s.n).fill('ESPERAR');
-    for(let i=1;i<s.n;i++) verdicts[i] = verdictAtVariant(s, i, v.key, mlSignal);
+    for(let i=1;i<s.n;i++) verdicts[i] = verdictAtVariant(s, i, v.key, mlSignal, gates);
     const r = simulateTrades(s, verdicts, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE);
     return {label:v.label, ...r};
   });
@@ -635,7 +685,7 @@ async function main(){
   console.log('========================================');
 
   const verdictsActual = new Array(s.n).fill('ESPERAR');
-  for(let i=1;i<s.n;i++) verdictsActual[i] = verdictAtVariant(s, i, 'adx_estricto', mlSignal);
+  for(let i=1;i<s.n;i++) verdictsActual[i] = verdictAtVariant(s, i, 'adx_estricto', mlSignal, gates);
 
   const slOptions = [3, 5, 7, 10];
   const tpOptions = [10, 15, 20, 25, 30];
