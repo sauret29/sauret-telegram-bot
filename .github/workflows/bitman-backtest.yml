@@ -1,7 +1,12 @@
 name: Bitman Backtest (manual)
 
 "on":
-  workflow_dispatch:   # solo se lanza a mano desde la pestaña Actions, nunca automático
+  workflow_dispatch:
+    inputs:
+      meses:
+        description: 'Meses de histórico a analizar (Binance solo tiene BTCUSDT desde 2017)'
+        required: true
+        default: '6'
 
 jobs:
   run-backtest:
@@ -15,7 +20,8 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Ejecutar backtest (puede tardar 1-2 minutos)
+      - name: Ejecutar backtest (puede tardar varios minutos con periodos largos)
         env:
           SYMBOL: 'BTCUSDT'
+          MESES_HISTORICO: ${{ github.event.inputs.meses }}
         run: node bitman-backtest.js
