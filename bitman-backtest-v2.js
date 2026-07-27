@@ -574,6 +574,89 @@ function computeTrendSpeed(closes, opens, opts){
   return { dynEma, speed:speedArr, trendspeed, signal };
 }
 
+// ============================================================
+// ANÁLISIS D — Excursión adversa (MAE) sin Stop Loss
+// ============================================================
+// Simula las operaciones SIN ningún stop loss ni take profit: cada
+// operación se abre en la señal y se cierra solo cuando el veredicto
+// deja de confirmar esa dirección (igual que la salida "natural" de la
+// estrategia). Para cada operación, registra cuál fue el PEOR precio
+// alcanzado en contra antes de esa salida — eso es la excursión adversa
+// máxima (MAE, Maximum Adverse Excursion), la métrica estándar para
+// decidir dónde tiene sentido poner un stop loss sin que se dispare
+// antes de tiempo en la mayoría de los casos.
+function simulateTradesMAE(s, verdicts){
+  const n = s.n;
+  let position=null, entryPrice=null, entryIdx=null, worstPrice=null, worstBarsAfter=0;
+  const trades = [];
+
+  const closeTrade = (exitPrice, i) => {
+    const finalReturnPct = position==='long' ? (exitPrice/entryPrice-1)*100 : (1-exitPrice/entryPrice)*100;
+    const maeAbsPct = position==='long' ? Math.max(0,(entryPrice-worstPrice)/entryPrice*100) : Math.max(0,(worstPrice-entryPrice)/entryPrice*100);
+    trades.push({
+      direction: position, entryPrice, exitPrice, finalReturnPct,
+      maeAbsPct, worstBarsAfter, durationBars: i-entryIdx,
+      ganadora: finalReturnPct > 0
+    });
+    position=null;
+  };
+
+  for(let i=1;i<n;i++){
+    if(position){
+      if(position==='long'){
+        if(s.lows[i] < worstPrice){ worstPrice = s.lows[i]; worstBarsAfter = i-entryIdx; }
+      } else {
+        if(s.highs[i] > worstPrice){ worstPrice = s.highs[i]; worstBarsAfter = i-entryIdx; }
+      }
+      const v = verdicts[i];
+      const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+      if(!stillValid) closeTrade(s.closes[i], i);
+    }
+    if(!position){
+      const v = verdicts[i];
+      if(v==='COMPRAR'){ position='long'; entryPrice=s.closes[i]; entryIdx=i; worstPrice=s.closes[i]; worstBarsAfter=0; }
+      else if(v==='VENDER'){ position='short'; entryPrice=s.closes[i]; entryIdx=i; worstPrice=s.closes[i]; worstBarsAfter=0; }
+    }
+  }
+  if(position) closeTrade(s.closes[n-1], n-1);
+  return trades;
+}
+
+function percentileOf(values, p){
+  const sorted = values.slice().sort((a,b)=>a-b);
+  return percentileLinearInterpolation(sorted, p);
+}
+function average(values){
+  if(!values.length) return 0;
+  return values.reduce((a,b)=>a+b,0)/values.length;
+}
+
+function printMAEStats(label, trades){
+  if(trades.length === 0){ console.log(pad(label,30) + '(sin operaciones)'); return; }
+  const maeValues = trades.map(t=>t.maeAbsPct);
+  const barsValues = trades.map(t=>t.worstBarsAfter);
+  console.log('\n--- ' + label + ' (' + trades.length + ' operaciones) ---');
+  console.log(
+    pad('  Percentil 10%:',22) + padL(maeValues.length? '-'+percentileOf(maeValues,10).toFixed(2)+'%':'-', 8) +
+    pad('   Percentil 75%:',22) + padL('-'+percentileOf(maeValues,75).toFixed(2)+'%', 8)
+  );
+  console.log(
+    pad('  Percentil 25%:',22) + padL('-'+percentileOf(maeValues,25).toFixed(2)+'%', 8) +
+    pad('   Percentil 90%:',22) + padL('-'+percentileOf(maeValues,90).toFixed(2)+'%', 8)
+  );
+  console.log(
+    pad('  Mediana (50%):',22) + padL('-'+percentileOf(maeValues,50).toFixed(2)+'%', 8) +
+    pad('   Percentil 95%:',22) + padL('-'+percentileOf(maeValues,95).toFixed(2)+'%', 8)
+  );
+  console.log(
+    pad('  Media:',22) + padL('-'+average(maeValues).toFixed(2)+'%', 8) +
+    pad('   Máximo:',22) + padL('-'+Math.max(...maeValues).toFixed(2)+'%', 8)
+  );
+  console.log('  Tiempo hasta el peor punto: media ' + average(barsValues).toFixed(1) + ' velas (~' + (average(barsValues)).toFixed(0) + 'h) · mediana ' + percentileOf(barsValues,50).toFixed(1) + ' velas');
+  const sinRetroceso = trades.filter(t=>t.maeAbsPct < 0.5).length;
+  console.log('  Operaciones casi sin retroceso (MAE < 0.5%): ' + sinRetroceso + ' de ' + trades.length + ' (' + (sinRetroceso/trades.length*100).toFixed(1) + '%)');
+}
+
 // Alinea una serie de temporalidad mayor (4H o Diario) contra los timestamps
 // de una serie menor (1H): para cada vela de 1H, devuelve el ÍNDICE de la
 // última vela de la temporalidad mayor que ya había cerrado en ese momento
@@ -687,6 +770,15 @@ function verdictAtVariant(s, i, variant, mlSignal, gates, trendSignal){
     // obligatorio: los tres tienen que estar de acuerdo con la dirección.
     comprarOk = aoAlcista && adxSubiendo && koBull && gateBullish && trendAlcista;
     venderOk  = aoBajista && adxSubiendo && koBear && gateBearish && trendBajista;
+  } else if(variant==='solo_koncorde_confluencia'){
+    // Sin AO ni ADX: solo Koncorde en 1H + que 4H o Diario confirmen.
+    comprarOk = koBull && gateBullish;
+    venderOk  = koBear && gateBearish;
+  } else if(variant==='solo_koncorde_confluencia_trendspeed'){
+    // Igual que la anterior, pero añadiendo el Trend Speed como filtro extra
+    // (aquí sí podría aportar algo, al no exigir ya AO/ADX por su cuenta).
+    comprarOk = koBull && gateBullish && trendAlcista;
+    venderOk  = koBear && gateBearish && trendBajista;
   }
 
   let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
@@ -812,12 +904,14 @@ async function main(){
   console.log('========================================');
 
   const variantes = [
-    {key:'adx_estricto',                label:'ADX estricto (actual)'},
-    {key:'sin_adx',                     label:'Sin ADX (solo AO+Koncorde)'},
-    {key:'adx_no_bajando',              label:'ADX no cayendo'},
-    {key:'ml_rsi',                      label:'ML RSI en vez de ADX'},
-    {key:'confluencia_htf',             label:'Confluencia 1H+(4H o Diario)'},
-    {key:'confluencia_htf_trendspeed',  label:'Confluencia + Trend Speed'}
+    {key:'adx_estricto',                          label:'ADX estricto (actual)'},
+    {key:'sin_adx',                               label:'Sin ADX (solo AO+Koncorde)'},
+    {key:'adx_no_bajando',                        label:'ADX no cayendo'},
+    {key:'ml_rsi',                                label:'ML RSI en vez de ADX'},
+    {key:'confluencia_htf',                       label:'Confluencia 1H+(4H o Diario)'},
+    {key:'confluencia_htf_trendspeed',            label:'Confluencia + Trend Speed'},
+    {key:'solo_koncorde_confluencia',             label:'Solo Koncorde + Confluencia'},
+    {key:'solo_koncorde_confluencia_trendspeed',  label:'Solo Koncorde + Confl. + Trend Speed'}
   ];
 
   const resultadosA = variantes.map(v=>{
@@ -827,9 +921,9 @@ async function main(){
     return {label:v.label, ...r};
   });
 
-  console.log('\n' + pad('Variante',28) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/Op',10) + padL('P.Factor',10));
+  console.log('\n' + pad('Variante',38) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/Op',10) + padL('P.Factor',10));
   resultadosA.forEach(r=>{
-    console.log(pad(r.label,28) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(fmtPct(r.avgReturnPerTradePct),10) + padL(r.profitFactor.toFixed(2),10));
+    console.log(pad(r.label,38) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(fmtPct(r.avgReturnPerTradePct),10) + padL(r.profitFactor.toFixed(2),10));
   });
 
   // ---------- ANÁLISIS B: barrido de SL/TP ----------
@@ -901,6 +995,22 @@ async function main(){
     const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
     console.log(pad('-'+sl+'%',8) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
   });
+
+  // ---------- ANÁLISIS D: excursión adversa (MAE) sin Stop Loss ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS D — Excursión en contra (MAE) SIN Stop Loss, variante: Confluencia 1H+(4H o Diario)');
+  console.log('========================================');
+  console.log('Cada operación se abre en la señal y se cierra solo cuando el veredicto cambia');
+  console.log('(sin ningún SL/TP de por medio). Se mide cuánto se movió el precio en contra');
+  console.log('(en %) en el peor momento de cada operación, antes de esa salida natural.');
+
+  const tradesMAE = simulateTradesMAE(s, verdictsActual); // verdictsActual = confluencia_htf (calculado en el Análisis B)
+
+  printMAEStats('TODAS las operaciones', tradesMAE);
+  printMAEStats('Solo LARGOS (compras)', tradesMAE.filter(t=>t.direction==='long'));
+  printMAEStats('Solo CORTOS (ventas)', tradesMAE.filter(t=>t.direction==='short'));
+  printMAEStats('Operaciones GANADORAS', tradesMAE.filter(t=>t.ganadora));
+  printMAEStats('Operaciones PERDEDORAS', tradesMAE.filter(t=>!t.ganadora));
 
   console.log('\n=== Fin del backtest ===');
 }
