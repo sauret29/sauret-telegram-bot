@@ -464,18 +464,19 @@ function buildConfluenceGates(series1H, series4H, seriesD){
   const idx4H = alignDailyIndex(series4H, series1H.times);
   const idxD = alignDailyIndex(seriesD, series1H.times);
   const n = series1H.n;
-  const bullish = new Array(n).fill(false);
-  const bearish = new Array(n).fill(false);
+  const bull4 = new Array(n).fill(false), bear4 = new Array(n).fill(false);
+  const bullD = new Array(n).fill(false), bearD = new Array(n).fill(false);
   for(let i=0;i<n;i++){
     const i4 = idx4H[i], iD = idxD[i];
-    const bull4 = i4>=0 && series4H.aoState[i4]==='Alcista' && series4H.koBull[i4];
-    const bear4 = i4>=0 && series4H.aoState[i4]==='Bajista' && series4H.koBear[i4];
-    const bullD = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
-    const bearD = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
-    bullish[i] = bull4 || bullD;
-    bearish[i] = bear4 || bearD;
+    bull4[i] = i4>=0 && series4H.aoState[i4]==='Alcista' && series4H.koBull[i4];
+    bear4[i] = i4>=0 && series4H.aoState[i4]==='Bajista' && series4H.koBear[i4];
+    bullD[i] = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+    bearD[i] = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
   }
-  return {bullish, bearish};
+  // 'bullish'/'bearish' (con OR) se mantienen para no romper la variante ya usada.
+  const bullish = bull4.map((v,i)=>v||bullD[i]);
+  const bearish = bear4.map((v,i)=>v||bearD[i]);
+  return {bullish, bearish, bull4, bear4, bullD, bearD};
 }
 
 
@@ -540,6 +541,12 @@ function verdictAtVariant(s, i, variant, mlSignal, gates){
     // (con que uno de los dos, vale) confirmen la misma tendencia.
     comprarOk = aoAlcista && adxSubiendo && koBull && gateBullish;
     venderOk  = aoBajista && adxSubiendo && koBear && gateBearish;
+  } else if(variant==='confluencia_htf_and'){
+    // Versión más estricta: exige que 4H Y Diario confirmen los DOS a la vez.
+    const gateBullishAnd = gates && gates.bull4[i] && gates.bullD[i];
+    const gateBearishAnd = gates && gates.bear4[i] && gates.bearD[i];
+    comprarOk = aoAlcista && adxSubiendo && koBull && gateBullishAnd;
+    venderOk  = aoBajista && adxSubiendo && koBear && gateBearishAnd;
   }
 
   let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
@@ -713,6 +720,41 @@ async function main(){
 
   console.log('\nMejor por retorno total: SL -' + bestByReturn.sl + '% / TP +' + bestByReturn.tp + '%  →  ' + fmtPct(bestByReturn.totalReturnPct) + ' (drawdown -' + bestByReturn.maxDrawdownPct.toFixed(1) + '%)');
   console.log('Mejor relación retorno/drawdown (más "seguro"): SL -' + bestByRiskAdj.sl + '% / TP +' + bestByRiskAdj.tp + '%  →  ' + fmtPct(bestByRiskAdj.totalReturnPct) + ' (drawdown -' + bestByRiskAdj.maxDrawdownPct.toFixed(1) + '%)');
+
+  // ---------- ANÁLISIS C: tres formas de intentar reducir el drawdown ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS C — Reducir el drawdown (partiendo de Confluencia + SL -5% / TP +15%)');
+  console.log('========================================');
+
+  // C1: barrido de apalancamiento (con la mejor combinación ya encontrada)
+  console.log('\n--- C1: Apalancamiento (Confluencia OR, SL -5% / TP +15%) ---');
+  console.log(pad('Apalanc.',10) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [1,2,3,4,5].forEach(lev=>{
+    const r = simulateTrades(s, verdictsActual, SL_DEFAULT_PCT, TP_DEFAULT_PCT, lev);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(lev+'x',10) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
+  // C2: confluencia con OR (uno de los dos) vs AND (los dos a la vez)
+  console.log('\n--- C2: Confluencia OR (uno de los dos) vs AND (los dos a la vez) — SL -5% / TP +15%, ' + LEVERAGE + 'x ---');
+  const verdictsAnd = new Array(s.n).fill('ESPERAR');
+  for(let i=1;i<s.n;i++) verdictsAnd[i] = verdictAtVariant(s, i, 'confluencia_htf_and', mlSignal, gates);
+  const rOr = simulateTrades(s, verdictsActual, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE);
+  const rAnd = simulateTrades(s, verdictsAnd, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE);
+  console.log(pad('Modo',10) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [{label:'OR (actual)', r:rOr}, {label:'AND (estricto)', r:rAnd}].forEach(x=>{
+    const retDD = x.r.maxDrawdownPct>0 ? (x.r.totalReturnPct/x.r.maxDrawdownPct) : (x.r.totalReturnPct>0?Infinity:0);
+    console.log(pad(x.label,10) + padL(x.r.trades,9) + padL(x.r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(x.r.totalReturnPct),11) + padL('-'+x.r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
+  // C3: SL más ajustado que el probado en el Análisis B (que solo bajaba hasta -3%)
+  console.log('\n--- C3: Stop Loss más ajustado (Confluencia OR, TP +15%, ' + LEVERAGE + 'x) ---');
+  console.log(pad('SL',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [1,1.5,2,2.5,3,4,5].forEach(sl=>{
+    const r = simulateTrades(s, verdictsActual, sl, TP_DEFAULT_PCT, LEVERAGE);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad('-'+sl+'%',8) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
 
   console.log('\n=== Fin del backtest ===');
 }
