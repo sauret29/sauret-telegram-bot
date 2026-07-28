@@ -18,6 +18,7 @@
 // ============================================================
 
 const MESES_HISTORICO = parseInt(process.env.MESES_HISTORICO || '6', 10);
+const MESES_RESERVADOS = parseInt(process.env.MESES_RESERVADOS || '12', 10);
 const LEVERAGE = 5;
 const SL_DEFAULT_PCT = 5;   // %
 const TP_DEFAULT_PCT = 15;  // %
@@ -731,7 +732,7 @@ function simulateTradesRiskSized(s, verdicts, slPct, tpPct, leverage, riskPct){
 function simulateTradesNoSL(s, verdicts, tpPct, leverage, marginFraction){
   const n = s.n;
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
-  let position = null, entryPrice = null, tpPrice = null;
+  let position = null, entryPrice = null, tpPrice = null, entryIdx = null;
   const trades = [];
   let peorOperacionPct = 0; // la operación individual más negativa, para vigilar el riesgo de cola
 
@@ -743,8 +744,8 @@ function simulateTradesNoSL(s, verdicts, tpPct, leverage, marginFraction){
     peak = Math.max(peak, equity);
     maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
     if(equityChange*100 < peorOperacionPct) peorOperacionPct = equityChange*100;
-    trades.push({ direction:position, equityChangePct:equityChange*100 });
-    position = null; entryPrice = null; tpPrice = null;
+    trades.push({ direction:position, equityChangePct:equityChange*100, entryIdx });
+    position = null; entryPrice = null; tpPrice = null; entryIdx = null;
   };
 
   for(let i=1;i<n;i++){
@@ -759,8 +760,8 @@ function simulateTradesNoSL(s, verdicts, tpPct, leverage, marginFraction){
     }
     if(!position){
       const v = verdicts[i];
-      if(v==='COMPRAR'){ position='long'; entryPrice=s.closes[i]; tpPrice = entryPrice*(1+tpPct/100); }
-      else if(v==='VENDER'){ position='short'; entryPrice=s.closes[i]; tpPrice = entryPrice*(1-tpPct/100); }
+      if(v==='COMPRAR'){ position='long'; entryPrice=s.closes[i]; tpPrice = entryPrice*(1+tpPct/100); entryIdx=i; }
+      else if(v==='VENDER'){ position='short'; entryPrice=s.closes[i]; tpPrice = entryPrice*(1-tpPct/100); entryIdx=i; }
     }
   }
   if(position) closeTrade(s.closes[n-1]);
@@ -774,7 +775,31 @@ function simulateTradesNoSL(s, verdicts, tpPct, leverage, marginFraction){
     totalReturnPct: (equity-1)*100,
     maxDrawdownPct: maxDrawdown*100,
     profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0),
-    peorOperacionPct
+    peorOperacionPct,
+    tradeLog: trades
+  };
+}
+
+// Recalcula las métricas para un SUBCONJUNTO de operaciones, componiendo el
+// capital desde cero (equity=1.0) solo con esas operaciones — así el tramo
+// reservado se evalúa como si fuera un periodo independiente, con su propio
+// drawdown, y no arrastra el resultado acumulado del resto del histórico.
+function metricsForTradeSubset(tradeLog){
+  let equity = 1.0, peak = 1.0, maxDrawdown = 0;
+  tradeLog.forEach(t=>{
+    equity *= Math.max(0, 1 + t.equityChangePct/100);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, (peak-equity)/peak);
+  });
+  const wins = tradeLog.filter(t=>t.equityChangePct>0).length;
+  const grossGain = tradeLog.filter(t=>t.equityChangePct>0).reduce((a,t)=>a+t.equityChangePct,0);
+  const grossLoss = Math.abs(tradeLog.filter(t=>t.equityChangePct<=0).reduce((a,t)=>a+t.equityChangePct,0));
+  return {
+    trades: tradeLog.length,
+    winRatePct: tradeLog.length ? (wins/tradeLog.length*100) : 0,
+    totalReturnPct: (equity-1)*100,
+    maxDrawdownPct: maxDrawdown*100,
+    profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0)
   };
 }
 
@@ -963,6 +988,35 @@ async function main(){
     const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
     console.log(pad(marginPct+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9) + padL(r.peorOperacionPct.toFixed(1)+'%',10));
   });
+
+  // ---------- ANÁLISIS H: validación fuera de muestra (tramo reservado) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS H — Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados, nunca usados para elegir nada');
+  console.log('========================================');
+  console.log('Configuración elegida con el resto del histórico: Confluencia + SIN Stop Loss + TP +15%,');
+  console.log('5x, 8% del capital por operación (el pico encontrado en el Análisis G).');
+  console.log('Aquí se separan las operaciones en dos grupos según su fecha de ENTRADA:');
+  console.log('  - "Resto del histórico": todo lo anterior al tramo reservado (esto es lo que ya vimos).');
+  console.log('  - "Tramo reservado": solo los últimos ' + MESES_RESERVADOS + ' meses, evaluados de forma aislada,');
+  console.log('    como si fueran un periodo nuevo e independiente (empezando con capital fresco).');
+
+  const cutoffReservadoTime = ohlcv.times[ohlcv.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const rConSplit = simulateTradesNoSL(s, verdictsActual, TP_DEFAULT_PCT, LEVERAGE, 0.08);
+  const tradesAntes = rConSplit.tradeLog.filter(t => s.times[t.entryIdx] < cutoffReservadoTime);
+  const tradesReservado = rConSplit.tradeLog.filter(t => s.times[t.entryIdx] >= cutoffReservadoTime);
+
+  const mAntes = metricsForTradeSubset(tradesAntes);
+  const mReservado = metricsForTradeSubset(tradesReservado);
+
+  console.log('\n' + pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntes.trades,9) + padL(mAntes.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntes.totalReturnPct),12) + padL('-'+mAntes.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntes.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservado.trades,9) + padL(mReservado.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservado.totalReturnPct),12) + padL('-'+mReservado.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservado.profitFactor.toFixed(2),10));
+
+  console.log('\nOJO: esto NO es una validación perfecta — la elección de "Confluencia + sin SL + 8%"');
+  console.log('se basó en el retorno agregado de TODO el periodo (incluido este tramo reservado),');
+  console.log('así que no es un fuera-de-muestra puro. Pero si el profit factor y el % de acierto');
+  console.log('del tramo reservado son similares (o mejores) que el resto, es una señal razonable');
+  console.log('de que la ventaja no depende solo de un tramo antiguo concreto del histórico.');
 
   console.log('\n=== Fin del backtest ===');
 }
