@@ -874,6 +874,23 @@ async function main(){
     console.log(pad(riskPct+'%',14) + padL(r.marginFractionPct.toFixed(1)+'%',20) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
   });
 
+  // ---------- ANÁLISIS F: el indicador ORIGINAL (sin Confluencia), con position sizing ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS F — El indicador ORIGINAL (solo AO+ADX+Koncorde, sin Confluencia) con riesgo fijo por operación');
+  console.log('========================================');
+  console.log('Exactamente el mismo indicador base del dashboard HTML original — sin ningún filtro');
+  console.log('de 4H/Diario añadido. Mismo position sizing que el Análisis E, para comparar directo.');
+
+  const verdictsOriginal = new Array(s.n).fill('ESPERAR');
+  for(let i=1;i<s.n;i++) verdictsOriginal[i] = verdictAtVariant(s, i, 'adx_estricto', mlSignal, gates);
+
+  console.log('\n' + pad('% arriesgado',14) + padL('% del capital usado',20) + padL('Operac.',9) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [0.5,1,2,3,5,10,25,50,100].forEach(riskPct=>{
+    const r = simulateTradesRiskSized(s, verdictsOriginal, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE, riskPct);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(riskPct+'%',14) + padL(r.marginFractionPct.toFixed(1)+'%',20) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
