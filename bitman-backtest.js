@@ -721,7 +721,65 @@ function simulateTradesRiskSized(s, verdicts, slPct, tpPct, leverage, riskPct){
   };
 }
 
+// Igual que simulateTradesRiskSized, pero SIN ningún stop loss: la operación
+// solo se cierra por Take Profit o por cambio de veredicto (nunca se corta
+// antes por precio). Al no existir una distancia de SL, no se puede calcular
+// el tamaño de posición a partir de un "% de riesgo" — aquí se especifica
+// directamente qué fracción fija del capital se usa en cada operación
+// (marginFraction), para poder comparar en igualdad de condiciones contra
+// las mismas fracciones que salieron en el Análisis E.
+function simulateTradesNoSL(s, verdicts, tpPct, leverage, marginFraction){
+  const n = s.n;
+  let equity = 1.0, peak = 1.0, maxDrawdown = 0;
+  let position = null, entryPrice = null, tpPrice = null;
+  const trades = [];
+  let peorOperacionPct = 0; // la operación individual más negativa, para vigilar el riesgo de cola
+
+  const closeTrade = (exitPrice) => {
+    const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
+    const leveraged = rawReturn * leverage;
+    const equityChange = marginFraction * leveraged;
+    equity *= Math.max(0, 1 + equityChange);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
+    if(equityChange*100 < peorOperacionPct) peorOperacionPct = equityChange*100;
+    trades.push({ direction:position, equityChangePct:equityChange*100 });
+    position = null; entryPrice = null; tpPrice = null;
+  };
+
+  for(let i=1;i<n;i++){
+    if(position){
+      const hitTP = position==='long' ? s.highs[i] >= tpPrice : s.lows[i] <= tpPrice;
+      if(hitTP){ closeTrade(tpPrice); }
+      else {
+        const v = verdicts[i];
+        const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+        if(!stillValid) closeTrade(s.closes[i]);
+      }
+    }
+    if(!position){
+      const v = verdicts[i];
+      if(v==='COMPRAR'){ position='long'; entryPrice=s.closes[i]; tpPrice = entryPrice*(1+tpPct/100); }
+      else if(v==='VENDER'){ position='short'; entryPrice=s.closes[i]; tpPrice = entryPrice*(1-tpPct/100); }
+    }
+  }
+  if(position) closeTrade(s.closes[n-1]);
+
+  const wins = trades.filter(t=>t.equityChangePct>0).length;
+  const grossGain = trades.filter(t=>t.equityChangePct>0).reduce((a,t)=>a+t.equityChangePct,0);
+  const grossLoss = Math.abs(trades.filter(t=>t.equityChangePct<=0).reduce((a,t)=>a+t.equityChangePct,0));
+  return {
+    trades: trades.length,
+    winRatePct: trades.length ? (wins/trades.length*100) : 0,
+    totalReturnPct: (equity-1)*100,
+    maxDrawdownPct: maxDrawdown*100,
+    profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0),
+    peorOperacionPct
+  };
+}
+
 function pad(str, len){ str=String(str); return str.length>=len ? str : str + ' '.repeat(len-str.length); }
+
 function padL(str, len){ str=String(str); return str.length>=len ? str : ' '.repeat(len-str.length) + str; }
 function fmtPct(n){ return (n>=0?'+':'') + n.toFixed(2) + '%'; }
 
@@ -889,6 +947,21 @@ async function main(){
     const r = simulateTradesRiskSized(s, verdictsOriginal, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE, riskPct);
     const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
     console.log(pad(riskPct+'%',14) + padL(r.marginFractionPct.toFixed(1)+'%',20) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
+  // ---------- ANÁLISIS G: Confluencia SIN stop loss (solo TP o cambio de veredicto) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS G — Confluencia SIN Stop Loss (TP +15% o cambio de veredicto, ' + LEVERAGE + 'x)');
+  console.log('========================================');
+  console.log('Sin SL no hay una distancia fija con la que calcular "% de riesgo", así que aquí se');
+  console.log('prueban directamente los mismos % de capital usado por operación que en el Análisis E,');
+  console.log('para comparar en igualdad de condiciones si quitar el SL ayuda o perjudica.');
+
+  console.log('\n' + pad('% capital usado',18) + padL('Operac.',9) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9) + padL('Peor op.',10));
+  [2,4,8,12,20,40,100].forEach(marginPct=>{
+    const r = simulateTradesNoSL(s, verdictsActual, TP_DEFAULT_PCT, LEVERAGE, marginPct/100);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(marginPct+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9) + padL(r.peorOperacionPct.toFixed(1)+'%',10));
   });
 
   console.log('\n=== Fin del backtest ===');
