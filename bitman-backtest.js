@@ -1018,6 +1018,23 @@ async function main(){
   console.log('del tramo reservado son similares (o mejores) que el resto, es una señal razonable');
   console.log('de que la ventaja no depende solo de un tramo antiguo concreto del histórico.');
 
+  // ---------- ANÁLISIS I: Confluencia SIN SL, con el nuevo TP del bot en vivo (3% de precio = 15% sobre la posición con 5x) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS I — Confluencia SIN Stop Loss, TP al 3% de precio (=15% sobre la posición con 5x)');
+  console.log('========================================');
+  console.log('Mismo barrido de % de capital usado que el Análisis G, pero con el TP ajustado');
+  console.log('para que sea un 15% de beneficio SOBRE LA POSICIÓN apalancada, no un 15% de precio.');
+  console.log('Con 5x, eso significa que el precio solo tiene que moverse un 3% para tocar el TP.');
+
+  const TP_LEVERAGED_PCT = 3; // 15 (objetivo sobre la posición) / 5 (leverage) = 3% de precio
+
+  console.log('\n' + pad('% capital usado',18) + padL('Operac.',9) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9) + padL('Peor op.',10));
+  [2,4,8,12,20,40,100].forEach(marginPct=>{
+    const r = simulateTradesNoSL(s, verdictsActual, TP_LEVERAGED_PCT, LEVERAGE, marginPct/100);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(marginPct+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9) + padL(r.peorOperacionPct.toFixed(1)+'%',10));
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
