@@ -780,6 +780,99 @@ function simulateTradesNoSL(s, verdicts, tpPct, leverage, marginFraction){
   };
 }
 
+// Igual que simulateTradesNoSL, pero descontando comisiones y funding reales
+// de Bitget (USDT-M perpetual, nivel estándar, margen aislado — el modo de
+// margen no cambia estos costes):
+//   - Entrada y cierre por cambio de veredicto: se asumen a mercado → taker (0.06%)
+//   - Cierre por Take Profit: se asume con orden límite ya puesta → maker (0.02%)
+//   - Funding: cada 8h que la posición sigue abierta, se descuenta un coste
+//     estimado (0.01% del NOCIONAL — precio×apalancamiento — por periodo).
+//     El funding real fluctúa entre -0.05% y +0.05% y puede ir a tu favor;
+//     0.01% es una estimación conservadora de la magnitud típica, no un
+//     valor exacto — el funding real depende del sentimiento del mercado.
+const BITGET_TAKER_FEE_PCT = 0.06;
+const BITGET_MAKER_FEE_PCT = 0.02;
+const BITGET_FUNDING_PCT_PER_8H = 0.01;
+const HORAS_POR_VELA_1H = 1;
+
+function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction){
+  const n = s.n;
+  let equity = 1.0, peak = 1.0, maxDrawdown = 0;
+  let position = null, entryPrice = null, tpPrice = null, entryIdx = null;
+  const trades = [];
+  let peorOperacionPct = 0;
+  let totalComisionesPct = 0, totalFundingPct = 0;
+
+  // El nocional (tamaño real de la posición en el exchange) es la porción
+  // de capital arriesgada multiplicada por el apalancamiento — las
+  // comisiones y el funding se cobran sobre ESE valor, no sobre el capital.
+  const nocionalFraction = marginFraction * leverage;
+
+  const closeTrade = (exitPrice, feePct, entryIdxLocal, exitIdxLocal) => {
+    const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
+    const leveraged = rawReturn * leverage;
+
+    // Comisión de entrada (taker, ya se pagó al abrir) + comisión de salida
+    const comisionSalidaPct = nocionalFraction * (feePct/100) * 100; // en % de la cuenta
+    const comisionTotalPct = comisionSalidaPct; // la de entrada ya se descontó al abrir (ver más abajo)
+
+    // Funding: nº de periodos de 8h completos que estuvo abierta la posición
+    const horasAbierta = (exitIdxLocal - entryIdxLocal) * HORAS_POR_VELA_1H;
+    const periodosFunding = Math.floor(horasAbierta / 8);
+    const fundingPct = nocionalFraction * (BITGET_FUNDING_PCT_PER_8H/100) * periodosFunding * 100;
+
+    const equityChange = marginFraction * leveraged - comisionTotalPct/100 - fundingPct/100;
+    equity *= Math.max(0, 1 + equityChange);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
+    if(equityChange*100 < peorOperacionPct) peorOperacionPct = equityChange*100;
+    totalComisionesPct += comisionTotalPct;
+    totalFundingPct += fundingPct;
+    trades.push({ direction:position, equityChangePct:equityChange*100, entryIdx });
+    position = null; entryPrice = null; tpPrice = null; entryIdx = null;
+  };
+
+  for(let i=1;i<n;i++){
+    if(position){
+      const hitTP = position==='long' ? s.highs[i] >= tpPrice : s.lows[i] <= tpPrice;
+      if(hitTP){ closeTrade(tpPrice, BITGET_MAKER_FEE_PCT, entryIdx, i); }
+      else {
+        const v = verdicts[i];
+        const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+        if(!stillValid) closeTrade(s.closes[i], BITGET_TAKER_FEE_PCT, entryIdx, i);
+      }
+    }
+    if(!position){
+      const v = verdicts[i];
+      if(v==='COMPRAR' || v==='VENDER'){
+        position = v==='COMPRAR' ? 'long' : 'short';
+        entryPrice = s.closes[i];
+        tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
+        entryIdx = i;
+        // Comisión de entrada (taker), se descuenta ya mismo de la cuenta.
+        const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
+        equity *= Math.max(0, 1 - comisionEntradaPct/100);
+        totalComisionesPct += comisionEntradaPct;
+      }
+    }
+  }
+  if(position) closeTrade(s.closes[n-1], BITGET_TAKER_FEE_PCT, entryIdx, n-1);
+
+  const wins = trades.filter(t=>t.equityChangePct>0).length;
+  const grossGain = trades.filter(t=>t.equityChangePct>0).reduce((a,t)=>a+t.equityChangePct,0);
+  const grossLoss = Math.abs(trades.filter(t=>t.equityChangePct<=0).reduce((a,t)=>a+t.equityChangePct,0));
+  return {
+    trades: trades.length,
+    winRatePct: trades.length ? (wins/trades.length*100) : 0,
+    totalReturnPct: (equity-1)*100,
+    maxDrawdownPct: maxDrawdown*100,
+    profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0),
+    peorOperacionPct,
+    totalComisionesPct,
+    totalFundingPct
+  };
+}
+
 // Recalcula las métricas para un SUBCONJUNTO de operaciones, componiendo el
 // capital desde cero (equity=1.0) solo con esas operaciones — así el tramo
 // reservado se evalúa como si fuera un periodo independiente, con su propio
@@ -1033,6 +1126,24 @@ async function main(){
     const r = simulateTradesNoSL(s, verdictsActual, TP_LEVERAGED_PCT, LEVERAGE, marginPct/100);
     const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
     console.log(pad(marginPct+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9) + padL(r.peorOperacionPct.toFixed(1)+'%',10));
+  });
+
+  // ---------- ANÁLISIS J: impacto de comisiones y funding reales de Bitget ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS J — Impacto de comisiones y funding reales de Bitget (USDT-M, margen aislado)');
+  console.log('========================================');
+  console.log('Comisiones: entrada y cierre por veredicto = taker (0.06%) · cierre por TP = maker (0.02%).');
+  console.log('Funding: 0.01% del nocional cada 8h que la posición sigue abierta (estimación conservadora;');
+  console.log('el funding real fluctúa entre -0.05% y +0.05% y puede ir a tu favor o en tu contra).');
+  console.log('TP al 3% de precio (=15% sobre la posición con 5x) — la configuración ganadora actual.');
+
+  const TP_ACTUAL_PCT = 3;
+  console.log('\n' + pad('% capital usado',18) + padL('Sin comisiones',16) + padL('Con comisiones',16) + padL('Diferencia',12) + padL('Comis.totales',14));
+  [2,4,8,12,20,40,100].forEach(marginPct=>{
+    const rSin = simulateTradesNoSL(s, verdictsActual, TP_ACTUAL_PCT, LEVERAGE, marginPct/100);
+    const rCon = simulateTradesNoSLConFees(s, verdictsActual, TP_ACTUAL_PCT, LEVERAGE, marginPct/100);
+    const diferencia = rCon.totalReturnPct - rSin.totalReturnPct;
+    console.log(pad(marginPct+'%',18) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(fmtPct(diferencia),12) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14));
   });
 
   console.log('\n=== Fin del backtest ===');
