@@ -1,20 +1,24 @@
 // ============================================================
-// Bitman Confluencia · Bot de alertas EN VIVO
+// Bitman Confluencia · Bot de alertas EN VIVO — v2 (señal en 4H)
 // ------------------------------------------------------------
-// Implementa la estrategia validada en el backtest:
-//   - Entrada en 1H: AO+ADX+Koncorde completo, confirmado por
-//     al menos una de (4H, Diario) con AO+Koncorde a favor.
+// Implementa la estrategia validada en el backtest, ACTUALIZADA
+// el 30 de julio de 2026 tras comprobar que la señal en 1H no
+// sobrevivía a comisiones reales de Bitget:
+//   - Entrada en 4H (no en 1H): el propio 4H tiene que dar su
+//     señal completa (AO+ADX+Koncorde), confirmada por el Diario
+//     (AO+Koncorde a favor de la misma dirección).
 //   - SIN stop loss: la posición solo se cierra por Take Profit
-//     (+15% fijo) o porque el veredicto deja de confirmar esa
-//     dirección.
+//     (+3% de precio = +15% sobre la posición con 5x) o porque
+//     el veredicto deja de confirmar esa dirección.
 //   - Recomendación de gestión (se recuerda en cada aviso, pero
-//     el bot NO opera ni mueve dinero): 8% del capital por
-//     operación, 5x de apalancamiento.
+//     el bot NO opera ni mueve dinero): 12% del capital por
+//     operación, 5x de apalancamiento — validado con comisiones
+//     reales incluidas y con los últimos 12 meses reservados
+//     como fuera de muestra (ver ESTRATEGIA-confluencia-sin-sl.md).
 //
-// A diferencia del bot original (que reporta cambios de veredicto
-// por temporalidad), este bot lleva la cuenta de si hay o no una
-// posición "abierta" (guardado en state.json), porque el aviso de
-// salida depende de si se tocó el TP o no.
+// Este bot lleva la cuenta de si hay o no una posición "abierta"
+// (guardado en state-confluencia.json), porque el aviso de salida
+// depende de si se tocó el TP o no.
 // ============================================================
 
 const fs = require('fs');
@@ -26,7 +30,7 @@ const TELEGRAM_CHAT_IDS = (process.env.TELEGRAM_CHAT_ID || '')
   .split(',').map(id => id.trim()).filter(id => id.length > 0);
 
 const LEVERAGE_INFO = 5;     // apalancamiento (se usa también para calcular el TP)
-const RISK_PCT_INFO = 8;     // solo informativo, se recuerda en el mensaje
+const RISK_PCT_INFO = 12;    // solo informativo, se recuerda en el mensaje (validado 12-20%)
 
 // El TP se define como % de beneficio sobre la POSICIÓN APALANCADA (lo que
 // realmente ves en tu cuenta), no como % de movimiento de precio. Con 5x,
@@ -496,62 +500,49 @@ function alignDailyIndex(dailySeries, targetTimes){
   return out;
 }
 
-// Puerta de confluencia: con que 4H O Diario confirmen la misma dirección
-// (AO+Koncorde en esa temporalidad), ya vale.
-function buildConfluenceGates(series1H, series4H, seriesD){
-  const idx4H = alignDailyIndex(series4H, series1H.times);
-  const idxD = alignDailyIndex(seriesD, series1H.times);
-  const n = series1H.n;
-  const bullish = new Array(n).fill(false), bearish = new Array(n).fill(false);
-  for(let i=0;i<n;i++){
-    const i4=idx4H[i], iD=idxD[i];
-    const bull4 = i4>=0 && series4H.aoState[i4]==='Alcista' && series4H.koBull[i4];
-    const bear4 = i4>=0 && series4H.aoState[i4]==='Bajista' && series4H.koBear[i4];
-    const bullD = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
-    const bearD = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
-    bullish[i] = bull4 || bullD;
-    bearish[i] = bear4 || bearD;
-  }
-  return {bullish, bearish};
-}
-
-// Veredicto de la última vela cerrada de 1H, con la lógica de Confluencia
-// (idéntica a la variante 'confluencia_htf' ya validada en el backtest).
-function verdictoActual(s1h, gates){
-  const i = s1h.n - 1;
-  const aoAlcista = s1h.aoState[i]==='Alcista', aoBajista = s1h.aoState[i]==='Bajista';
-  let comprarOk = aoAlcista && s1h.adxSubiendo[i] && s1h.koBull[i] && gates.bullish[i];
-  let venderOk  = aoBajista && s1h.adxSubiendo[i] && s1h.koBear[i] && gates.bearish[i];
+// Veredicto de la última vela cerrada de 4H: el propio 4H tiene que dar su
+// señal completa (AO+ADX+Koncorde), confirmada por el Diario (AO+Koncorde
+// a favor de la misma dirección) — idéntico al Análisis K/L del backtest,
+// la variante validada tanto en el agregado de 9 años como fuera de muestra.
+function verdictoActual(s4h, sD){
+  const i = s4h.n - 1;
+  const idxD = alignDailyIndex(sD, s4h.times);
+  const iD = idxD[i];
+  const aoAlcista = s4h.aoState[i]==='Alcista', aoBajista = s4h.aoState[i]==='Bajista';
+  const dailyBullish = iD>=0 && sD.aoState[iD]==='Alcista' && sD.koBull[iD];
+  const dailyBearish = iD>=0 && sD.aoState[iD]==='Bajista' && sD.koBear[iD];
+  let comprarOk = aoAlcista && s4h.adxSubiendo[i] && s4h.koBull[i] && dailyBullish;
+  let venderOk  = aoBajista && s4h.adxSubiendo[i] && s4h.koBear[i] && dailyBearish;
   let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
   let motivo = '';
-  if(verdict==='COMPRAR') motivo = 'AO alcista + ADX subiendo + Koncorde (1H), confirmado por 4H o Diario.';
-  else if(verdict==='VENDER') motivo = 'AO bajista + ADX subiendo + Koncorde (1H), confirmado por 4H o Diario.';
+  if(verdict==='COMPRAR') motivo = 'AO alcista + ADX subiendo + Koncorde (4H), confirmado por el Diario.';
+  else if(verdict==='VENDER') motivo = 'AO bajista + ADX subiendo + Koncorde (4H), confirmado por el Diario.';
 
   // Cierre forzado de protección (idéntico al backtest y al bot original):
   // manda por encima de cualquier otra condición, tanto si hay una posición
   // que cerrar como si dispara una entrada corta nueva sin más confirmación.
   let forced = false;
-  if(!isNaN(s1h.konVal[i]) && !isNaN(s1h.maTrend[i]) && s1h.konVal[i] < s1h.maTrend[i]){
+  if(!isNaN(s4h.konVal[i]) && !isNaN(s4h.maTrend[i]) && s4h.konVal[i] < s4h.maTrend[i]){
     verdict = 'VENDER';
     motivo = 'Koncorde por debajo de su media (maTrend) — manda por encima del resto de condiciones.';
     forced = true;
   }
-  return { verdict, motivo, forced, price: s1h.closes[i], time: s1h.times[i] };
+  return { verdict, motivo, forced, price: s4h.closes[i], time: s4h.times[i] };
 }
 
 // Procesa un "tick" (una comprobación): dado el veredicto actual y el estado
 // previo, decide qué mensajes hay que mandar y cómo queda el nuevo estado.
 // Separada de main() para poder probarla con datos de control, sin red ni
 // sistema de archivos de por medio.
-function processTick(s1h, actual, state){
+function processTick(s4h, actual, state){
   const messages = [];
   const newState = Object.assign({}, state);
 
   if(newState.position){
-    const last = s1h.n - 1;
+    const last = s4h.n - 1;
     const hitTP = newState.position==='long'
-      ? s1h.highs[last] >= newState.tpPrice
-      : s1h.lows[last] <= newState.tpPrice;
+      ? s4h.highs[last] >= newState.tpPrice
+      : s4h.lows[last] <= newState.tpPrice;
 
     if(hitTP){
       const gananciaPct = newState.position==='long'
@@ -601,20 +592,17 @@ async function main(){
   const now = new Date();
   console.log('Bitman Confluencia — comprobando ' + SYMBOL + ' a las ' + now.toISOString());
 
-  const ohlcv1h = await fetchRecentCandles('1h', 800);
   const ohlcv4h = await fetchRecentCandles('4h', 400);
   const ohlcvD  = await fetchRecentCandles('1d', 400);
-  console.log('Velas 1H: ' + ohlcv1h.closes.length + ' · 4H: ' + ohlcv4h.closes.length + ' · Diario: ' + ohlcvD.closes.length);
+  console.log('Velas 4H: ' + ohlcv4h.closes.length + ' · Diario: ' + ohlcvD.closes.length);
 
-  const s1h = computeFullSeries(ohlcv1h);
   const s4h = computeFullSeries(ohlcv4h);
   const sD  = computeFullSeries(ohlcvD);
-  const gates = buildConfluenceGates(s1h, s4h, sD);
-  const actual = verdictoActual(s1h, gates);
-  console.log('Veredicto actual (1H, vela ' + new Date(actual.time).toISOString() + '): ' + actual.verdict + ' — precio ' + actual.price);
+  const actual = verdictoActual(s4h, sD);
+  console.log('Veredicto actual (4H, vela ' + new Date(actual.time).toISOString() + '): ' + actual.verdict + ' — precio ' + actual.price);
 
   const state = loadState();
-  const { messages, newState } = processTick(s1h, actual, state);
+  const { messages, newState } = processTick(s4h, actual, state);
 
   if(messages.length){
     const header = '📊 <b>Bitman Confluencia · ' + SYMBOL + '</b>\n\n';
