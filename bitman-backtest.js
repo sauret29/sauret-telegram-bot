@@ -1138,12 +1138,23 @@ async function main(){
   console.log('TP al 3% de precio (=15% sobre la posición con 5x) — la configuración ganadora actual.');
 
   const TP_ACTUAL_PCT = 3;
-  console.log('\n' + pad('% capital usado',18) + padL('Sin comisiones',16) + padL('Con comisiones',16) + padL('Diferencia',12) + padL('Comis.totales',14));
+  console.log('\n--- Con TP al 3% de precio (config. actual, ' + s.n + ' velas totales) ---');
+  console.log(pad('% capital usado',18) + padL('Sin comisiones',16) + padL('Con comisiones',16) + padL('Diferencia',12) + padL('Comis.totales',14));
   [2,4,8,12,20,40,100].forEach(marginPct=>{
     const rSin = simulateTradesNoSL(s, verdictsActual, TP_ACTUAL_PCT, LEVERAGE, marginPct/100);
     const rCon = simulateTradesNoSLConFees(s, verdictsActual, TP_ACTUAL_PCT, LEVERAGE, marginPct/100);
     const diferencia = rCon.totalReturnPct - rSin.totalReturnPct;
     console.log(pad(marginPct+'%',18) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(fmtPct(diferencia),12) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14));
+  });
+
+  // ---------- Comparación: ¿el TP ancho (15%, menos operaciones) aguanta mejor las comisiones? ----------
+  console.log('\n--- Con TP al 15% de precio (el original, menos operaciones — para comparar el efecto de la frecuencia) ---');
+  console.log(pad('% capital usado',18) + padL('Sin comisiones',16) + padL('Con comisiones',16) + padL('Diferencia',12) + padL('Comis.totales',14) + padL('Operac.',9));
+  [2,4,8,12,20,40,100].forEach(marginPct=>{
+    const rSin = simulateTradesNoSL(s, verdictsActual, 15, LEVERAGE, marginPct/100);
+    const rCon = simulateTradesNoSLConFees(s, verdictsActual, 15, LEVERAGE, marginPct/100);
+    const diferencia = rCon.totalReturnPct - rSin.totalReturnPct;
+    console.log(pad(marginPct+'%',18) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(fmtPct(diferencia),12) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14) + padL(rCon.trades,9));
   });
 
   console.log('\n=== Fin del backtest ===');
