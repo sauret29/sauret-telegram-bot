@@ -1190,9 +1190,9 @@ async function main(){
     return verdicts;
   }
 
-  const verdicts4H = buildVerdicts4H(s4h, sD);
+  const verdicts4H = buildVerdicts4H(s4H, sD);
   const numSenales4H = verdicts4H.filter(v=>v!=='ESPERAR').length;
-  console.log('\nVelas de 4H con señal activa: ' + numSenales4H + ' de ' + s4h.n + ' (frente a las ' + s.n + ' velas de 1H)');
+  console.log('\nVelas de 4H con señal activa: ' + numSenales4H + ' de ' + s4H.n + ' (frente a las ' + s.n + ' velas de 1H)');
 
   [
     {label:'TP 3% de precio (=15% posición con 5x)', tp:3},
@@ -1201,8 +1201,8 @@ async function main(){
     console.log('\n--- ' + cfg.label + ' ---');
     console.log(pad('% capital usado',18) + padL('Operac.',9) + padL('Sin comisiones',16) + padL('Con comisiones',16) + padL('Comis.totales',14));
     [2,4,8,12,20,40,100].forEach(marginPct=>{
-      const rSin = simulateTradesNoSL(s4h, verdicts4H, cfg.tp, LEVERAGE, marginPct/100);
-      const rCon = simulateTradesNoSLConFees(s4h, verdicts4H, cfg.tp, LEVERAGE, marginPct/100, 4); // velas de 4H
+      const rSin = simulateTradesNoSL(s4H, verdicts4H, cfg.tp, LEVERAGE, marginPct/100);
+      const rCon = simulateTradesNoSLConFees(s4H, verdicts4H, cfg.tp, LEVERAGE, marginPct/100, 4); // velas de 4H
       console.log(pad(marginPct+'%',18) + padL(rCon.trades,9) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14));
     });
   });
