@@ -795,7 +795,8 @@ const BITGET_MAKER_FEE_PCT = 0.02;
 const BITGET_FUNDING_PCT_PER_8H = 0.01;
 const HORAS_POR_VELA_1H = 1;
 
-function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction){
+function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction, horasPorVela){
+  if(horasPorVela==null) horasPorVela = 1; // por defecto, velas de 1H (comportamiento anterior)
   const n = s.n;
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
   let position = null, entryPrice = null, tpPrice = null, entryIdx = null;
@@ -817,7 +818,7 @@ function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction)
     const comisionTotalPct = comisionSalidaPct; // la de entrada ya se descontó al abrir (ver más abajo)
 
     // Funding: nº de periodos de 8h completos que estuvo abierta la posición
-    const horasAbierta = (exitIdxLocal - entryIdxLocal) * HORAS_POR_VELA_1H;
+    const horasAbierta = (exitIdxLocal - entryIdxLocal) * horasPorVela;
     const periodosFunding = Math.floor(horasAbierta / 8);
     const fundingPct = nocionalFraction * (BITGET_FUNDING_PCT_PER_8H/100) * periodosFunding * 100;
 
@@ -1155,6 +1156,55 @@ async function main(){
     const rCon = simulateTradesNoSLConFees(s, verdictsActual, 15, LEVERAGE, marginPct/100);
     const diferencia = rCon.totalReturnPct - rSin.totalReturnPct;
     console.log(pad(marginPct+'%',18) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(fmtPct(diferencia),12) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14) + padL(rCon.trades,9));
+  });
+
+  // ---------- ANÁLISIS K: señal en 4H (confirmada por Diario), con comisiones desde el principio ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS K — Señal generada en 4H (confirmada por Diario), no en 1H — para reducir la frecuencia');
+  console.log('========================================');
+  console.log('Misma lógica de Confluencia, pero un escalón más arriba: el 4H tiene que dar su propia');
+  console.log('señal completa (AO+ADX+Koncorde), confirmada por el Diario (AO+Koncorde). Sin Stop Loss.');
+  console.log('Comisiones y funding de Bitget incluidos desde el principio (velas de 4H → funding cada');
+  console.log('8h = cada 2 velas).');
+
+  // Construye el veredicto en la propia serie de 4H, usando el Diario como
+  // confirmación (mismo patrón que buildConfluenceGates, pero un nivel más
+  // arriba: aquí NO hace falta la puerta OR con 4H, porque el 4H ES la señal).
+  function buildVerdicts4H(series4H, seriesD){
+    const idxD = alignDailyIndex(seriesD, series4H.times);
+    const n = series4H.n;
+    const verdicts = new Array(n).fill('ESPERAR');
+    for(let i=1;i<n;i++){
+      const iD = idxD[i];
+      const aoAlcista = series4H.aoState[i]==='Alcista', aoBajista = series4H.aoState[i]==='Bajista';
+      const dailyBullish = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+      const dailyBearish = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+      let comprarOk = aoAlcista && series4H.adxSubiendo[i] && series4H.koBull[i] && dailyBullish;
+      let venderOk  = aoBajista && series4H.adxSubiendo[i] && series4H.koBear[i] && dailyBearish;
+      let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
+      if(!isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i]){
+        verdict = 'VENDER';
+      }
+      verdicts[i] = verdict;
+    }
+    return verdicts;
+  }
+
+  const verdicts4H = buildVerdicts4H(s4h, sD);
+  const numSenales4H = verdicts4H.filter(v=>v!=='ESPERAR').length;
+  console.log('\nVelas de 4H con señal activa: ' + numSenales4H + ' de ' + s4h.n + ' (frente a las ' + s.n + ' velas de 1H)');
+
+  [
+    {label:'TP 3% de precio (=15% posición con 5x)', tp:3},
+    {label:'TP 15% de precio (=75% posición con 5x)', tp:15}
+  ].forEach(cfg=>{
+    console.log('\n--- ' + cfg.label + ' ---');
+    console.log(pad('% capital usado',18) + padL('Operac.',9) + padL('Sin comisiones',16) + padL('Con comisiones',16) + padL('Comis.totales',14));
+    [2,4,8,12,20,40,100].forEach(marginPct=>{
+      const rSin = simulateTradesNoSL(s4h, verdicts4H, cfg.tp, LEVERAGE, marginPct/100);
+      const rCon = simulateTradesNoSLConFees(s4h, verdicts4H, cfg.tp, LEVERAGE, marginPct/100, 4); // velas de 4H
+      console.log(pad(marginPct+'%',18) + padL(rCon.trades,9) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14));
+    });
   });
 
   console.log('\n=== Fin del backtest ===');
