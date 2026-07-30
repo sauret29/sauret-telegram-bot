@@ -25,9 +25,15 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_CHAT_IDS = (process.env.TELEGRAM_CHAT_ID || '')
   .split(',').map(id => id.trim()).filter(id => id.length > 0);
 
-const TP_PCT = 15;          // Take Profit fijo (%)
-const LEVERAGE_INFO = 5;    // solo informativo, se recuerda en el mensaje
-const RISK_PCT_INFO = 8;    // solo informativo, se recuerda en el mensaje
+const LEVERAGE_INFO = 5;     // apalancamiento (se usa también para calcular el TP)
+const RISK_PCT_INFO = 8;     // solo informativo, se recuerda en el mensaje
+
+// El TP se define como % de beneficio sobre la POSICIÓN APALANCADA (lo que
+// realmente ves en tu cuenta), no como % de movimiento de precio. Con 5x,
+// pedir un 15% de beneficio sobre la posición implica que el precio solo
+// tiene que moverse un 15/5 = 3%.
+const TP_EQUITY_PCT = 15;
+const TP_PCT = TP_EQUITY_PCT / LEVERAGE_INFO; // % de movimiento de PRECIO necesario
 
 const STATE_FILE = path.join(__dirname, 'state-confluencia.json');
 
@@ -521,12 +527,16 @@ function verdictoActual(s1h, gates){
   if(verdict==='COMPRAR') motivo = 'AO alcista + ADX subiendo + Koncorde (1H), confirmado por 4H o Diario.';
   else if(verdict==='VENDER') motivo = 'AO bajista + ADX subiendo + Koncorde (1H), confirmado por 4H o Diario.';
 
-  // Cierre forzado de protección (idéntico al backtest y al bot original).
+  // Cierre forzado de protección (idéntico al backtest y al bot original):
+  // manda por encima de cualquier otra condición, tanto si hay una posición
+  // que cerrar como si dispara una entrada corta nueva sin más confirmación.
+  let forced = false;
   if(!isNaN(s1h.konVal[i]) && !isNaN(s1h.maTrend[i]) && s1h.konVal[i] < s1h.maTrend[i]){
     verdict = 'VENDER';
-    motivo = 'Cierre forzado: Koncorde por debajo de su media (maTrend).';
+    motivo = 'Koncorde por debajo de su media (maTrend) — manda por encima del resto de condiciones.';
+    forced = true;
   }
-  return { verdict, motivo, price: s1h.closes[i], time: s1h.times[i] };
+  return { verdict, motivo, forced, price: s1h.closes[i], time: s1h.times[i] };
 }
 
 // Procesa un "tick" (una comprobación): dado el veredicto actual y el estado
@@ -550,7 +560,7 @@ function processTick(s1h, actual, state){
       messages.push(
         '🎯 <b>Take Profit alcanzado</b> (' + (newState.position==='long'?'largo':'corto') + ')\n' +
         'Entrada: ' + newState.entryPrice.toFixed(2) + ' → TP: ' + newState.tpPrice.toFixed(2) +
-        ' (' + (gananciaPct>=0?'+':'') + gananciaPct.toFixed(2) + '% de precio, x' + LEVERAGE_INFO + ' apalancamiento)'
+        ' (precio ' + (gananciaPct>=0?'+':'') + gananciaPct.toFixed(2) + '% · posición ' + (gananciaPct>=0?'+':'') + (gananciaPct*LEVERAGE_INFO).toFixed(1) + '% con x' + LEVERAGE_INFO + ')'
       );
       newState.position = null; newState.entryPrice = null; newState.tpPrice = null; newState.entryTime = null;
     } else {
@@ -563,7 +573,7 @@ function processTick(s1h, actual, state){
           '🔻 <b>Cierre por cambio de veredicto</b> (' + (newState.position==='long'?'largo':'corto') + ')\n' +
           'Entrada: ' + newState.entryPrice.toFixed(2) + ' → Cierre: ' + actual.price.toFixed(2) +
           ' (' + (gananciaPct>=0?'+':'') + gananciaPct.toFixed(2) + '% de precio, x' + LEVERAGE_INFO + ' apalancamiento)\n' +
-          escapeHtml(actual.motivo)
+          escapeHtml(actual.forced ? 'Cierre forzado: ' + actual.motivo : actual.motivo)
         );
         newState.position = null; newState.entryPrice = null; newState.tpPrice = null; newState.entryTime = null;
       }
@@ -576,8 +586,8 @@ function processTick(s1h, actual, state){
       const tpPrice = direction==='long' ? actual.price*(1+TP_PCT/100) : actual.price*(1-TP_PCT/100);
       messages.push(
         (direction==='long' ? '🟢' : '🔴') + ' <b>Nueva entrada: ' + (direction==='long'?'LARGO':'CORTO') + '</b>\n' +
-        'Precio: ' + actual.price.toFixed(2) + ' · TP: ' + tpPrice.toFixed(2) + ' (+' + TP_PCT + '%)\n' +
-        escapeHtml(actual.motivo) + '\n' +
+        'Precio: ' + actual.price.toFixed(2) + ' · TP: ' + tpPrice.toFixed(2) + ' (precio +' + TP_PCT.toFixed(1) + '% · posición +' + TP_EQUITY_PCT + '% con x' + LEVERAGE_INFO + ')\n' +
+        escapeHtml(actual.forced ? 'Entrada forzada solo por Koncorde (sin la confirmación habitual de AO+ADX+4H/Diario): ' + actual.motivo : actual.motivo) + '\n' +
         '<i>Recordatorio de gestión: ' + RISK_PCT_INFO + '% del capital, x' + LEVERAGE_INFO + '. Sin stop loss — cierra por TP o por cambio de veredicto.</i>'
       );
       newState.position = direction; newState.entryPrice = actual.price; newState.tpPrice = tpPrice; newState.entryTime = actual.time;
