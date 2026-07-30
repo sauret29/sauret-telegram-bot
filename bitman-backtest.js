@@ -870,7 +870,8 @@ function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction,
     profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0),
     peorOperacionPct,
     totalComisionesPct,
-    totalFundingPct
+    totalFundingPct,
+    tradeLog: trades
   };
 }
 
@@ -1206,6 +1207,37 @@ async function main(){
       console.log(pad(marginPct+'%',18) + padL(rCon.trades,9) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14));
     });
   });
+
+  // ---------- ANÁLISIS L: validación fuera de muestra de la señal en 4H, CON comisiones ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS L — Validación fuera de muestra de la señal en 4H, con comisiones (últimos ' + MESES_RESERVADOS + ' meses reservados)');
+  console.log('========================================');
+  console.log('Misma idea que el Análisis H, pero con la señal de 4H (Análisis K) y las comisiones');
+  console.log('reales de Bitget ya incluidas en el propio cálculo, no añadidas después.');
+
+  const cutoffReservado4H = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+
+  [
+    {label:'TP 3% de precio, 12% capital', tp:3, margin:0.12},
+    {label:'TP 3% de precio, 20% capital', tp:3, margin:0.20},
+    {label:'TP 15% de precio, 12% capital', tp:15, margin:0.12},
+    {label:'TP 15% de precio, 20% capital', tp:15, margin:0.20}
+  ].forEach(cfg=>{
+    console.log('\n--- ' + cfg.label + ' ---');
+    const rFull = simulateTradesNoSLConFees(s4H, verdicts4H, cfg.tp, LEVERAGE, cfg.margin, 4);
+    const tradesAntes4H = rFull.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservado4H);
+    const tradesReservado4H = rFull.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservado4H);
+    const mAntes4H = metricsForTradeSubset(tradesAntes4H);
+    const mReservado4H = metricsForTradeSubset(tradesReservado4H);
+    console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+    console.log(pad('Resto del histórico',20) + padL(mAntes4H.trades,9) + padL(mAntes4H.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntes4H.totalReturnPct),12) + padL('-'+mAntes4H.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntes4H.profitFactor.toFixed(2),10));
+    console.log(pad('TRAMO RESERVADO',20) + padL(mReservado4H.trades,9) + padL(mReservado4H.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservado4H.totalReturnPct),12) + padL('-'+mReservado4H.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservado4H.profitFactor.toFixed(2),10));
+  });
+
+  console.log('\nOJO: misma salvedad que el Análisis H — la elección de esta configuración se basó en el');
+  console.log('retorno agregado de TODO el periodo (incluido el tramo reservado), así que no es un');
+  console.log('fuera-de-muestra puro. Pero si el tramo reservado aguanta igual o mejor que el resto,');
+  console.log('es una señal razonable de que la ventaja no depende solo de una parte antigua del histórico.');
 
   console.log('\n=== Fin del backtest ===');
 }
