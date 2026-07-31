@@ -1,6 +1,6 @@
 {
-  "position": null,
-  "entryPrice": null,
-  "tpPrice": null,
-  "entryTime": null
+  "position": "short",
+  "entryPrice": 63981.99,
+  "tpPrice": 62062.5303,
+  "entryTime": 1785470400000
 }
