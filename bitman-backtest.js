@@ -1200,6 +1200,50 @@ async function main(){
     return verdicts;
   }
 
+  // Réplica fiel del ENHANCED_FILTER del bot original: exige que AO+ADX
+  // confirmen con CONFIRM_LOOKBACK velas de continuidad (no solo 1), que el
+  // ADX esté por encima de ADX_MIN_LEVEL (tendencia real según Wilder), y
+  // que el BBWP esté por encima de BBWP_MIN_LEVEL (sin compresión extrema).
+  // Igual que en el diseño original, esto SOLO endurece el lado comprador —
+  // las ventas (y el cierre forzado por Koncorde) usan siempre la lectura
+  // estándar de 1 vela, para no retrasar nunca una salida.
+  const CONFIRM_LOOKBACK = 3, ADX_MIN_LEVEL = 20, BBWP_MIN_LEVEL = 25;
+  function momentumState(series, i, lookback){
+    if(i < lookback || isNaN(series.ao[i]) || isNaN(series.ao[i-lookback])){
+      return { aoState:'Sin datos', adxSubiendo:false };
+    }
+    const subiendo = series.ao[i] > series.ao[i-lookback];
+    let aoState;
+    if(series.ao[i]>=0 && subiendo) aoState='Alcista';
+    else if(series.ao[i]>=0 && !subiendo) aoState='Retroceso alcista';
+    else if(series.ao[i]<0 && !subiendo) aoState='Bajista';
+    else aoState='Retroceso bajista';
+    const adxSubiendo = !isNaN(series.adx[i]) && !isNaN(series.adx[i-lookback]) && series.adx[i] > series.adx[i-lookback];
+    return { aoState, adxSubiendo };
+  }
+  function buildVerdicts4HEnhanced(series4H, seriesD){
+    const idxD = alignDailyIndex(seriesD, series4H.times);
+    const n = series4H.n;
+    const verdicts = new Array(n).fill('ESPERAR');
+    for(let i=1;i<n;i++){
+      const iD = idxD[i];
+      const entryMs = momentumState(series4H, i, CONFIRM_LOOKBACK); // solo para el lado comprador
+      const aoBajista = series4H.aoState[i]==='Bajista'; // el lado vendedor sigue con lectura estándar (1 vela)
+      const dailyBullish = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+      const dailyBearish = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+      const adxFloorOk = !isNaN(series4H.adx[i]) && series4H.adx[i] >= ADX_MIN_LEVEL;
+      const bbwpOk = !isNaN(series4H.bbwp[i]) && series4H.bbwp[i] > BBWP_MIN_LEVEL;
+      let comprarOk = entryMs.aoState==='Alcista' && entryMs.adxSubiendo && series4H.koBull[i] && dailyBullish && adxFloorOk && bbwpOk;
+      let venderOk  = aoBajista && series4H.adxSubiendo[i] && series4H.koBear[i] && dailyBearish;
+      let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
+      if(!isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i]){
+        verdict = 'VENDER';
+      }
+      verdicts[i] = verdict;
+    }
+    return verdicts;
+  }
+
   const verdicts4H = buildVerdicts4H(s4H, sD);
   const numSenales4H = verdicts4H.filter(v=>v!=='ESPERAR').length;
   console.log('\nVelas de 4H con señal activa: ' + numSenales4H + ' de ' + s4H.n + ' (frente a las ' + s.n + ' velas de 1H)');
@@ -1313,6 +1357,36 @@ async function main(){
     const m2021 = metricsForTradeSubset(buckets2021);
     console.log(pad(sl==null?'(sin SL)':'-'+sl+'%',10) + padL(m2021.trades,9) + padL(fmtPct(m2021.totalReturnPct),12) + padL('-'+m2021.maxDrawdownPct.toFixed(1)+'%',11) + padL(m2021.profitFactor.toFixed(2),10));
   });
+
+  // ---------- ANÁLISIS O: filtro reforzado (3 velas + ADX>=20 + BBWP>25) vs normal ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS O — Filtro reforzado (ENHANCED_FILTER del bot original) vs señal normal, en 4H con comisiones');
+  console.log('========================================');
+  console.log('El filtro reforzado exige, SOLO para comprar: AO+ADX confirmando con 3 velas de');
+  console.log('continuidad (no 1), ADX >= 20, y BBWP > 25. Las ventas y el cierre forzado por Koncorde');
+  console.log('siguen igual que siempre. Objetivo: menos señales, de más calidad, en años revueltos.');
+
+  const verdicts4HEnhanced = buildVerdicts4HEnhanced(s4H, sD);
+  const numSenalesEnhanced = verdicts4HEnhanced.filter(v=>v!=='ESPERAR').length;
+  console.log('\nVelas con señal activa — normal: ' + numSenales4H + ' · reforzada: ' + numSenalesEnhanced);
+
+  console.log('\n--- Conjunto completo (TP 3% de precio, 12% capital) ---');
+  console.log(pad('Variante',12) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const rNormal = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4);
+  const rEnhanced = simulateTradesNoSLConFees(s4H, verdicts4HEnhanced, 3, LEVERAGE, 0.12, 4);
+  console.log(pad('Normal',12) + padL(rNormal.trades,9) + padL(fmtPct(rNormal.totalReturnPct),12) + padL('-'+rNormal.maxDrawdownPct.toFixed(1)+'%',11) + padL(rNormal.profitFactor.toFixed(2),10));
+  console.log(pad('Reforzada',12) + padL(rEnhanced.trades,9) + padL(fmtPct(rEnhanced.totalReturnPct),12) + padL('-'+rEnhanced.maxDrawdownPct.toFixed(1)+'%',11) + padL(rEnhanced.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Año por año, normal vs reforzada (TP 3%, 12% capital) ---');
+  console.log(pad('Año',8) + padL('P.Factor Normal',17) + padL('P.Factor Reforzada',19) + padL('Retorno Normal',16) + padL('Retorno Reforzada',18));
+  for(let year=2017; year<=2026; year++){
+    const bucketsN = rNormal.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    const bucketsE = rEnhanced.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    if(bucketsN.length===0 && bucketsE.length===0) continue;
+    const mN = metricsForTradeSubset(bucketsN);
+    const mE = metricsForTradeSubset(bucketsE);
+    console.log(pad(String(year),8) + padL(mN.profitFactor.toFixed(2),17) + padL(mE.profitFactor.toFixed(2),19) + padL(fmtPct(mN.totalReturnPct),16) + padL(fmtPct(mE.totalReturnPct),18));
+  }
 
   console.log('\n=== Fin del backtest ===');
 }
