@@ -244,3 +244,37 @@ async function main() {
         controlWinRate,
         edge,
       });
+
+      console.log(`   Lookback ${lookback}: ${evalResult.total} cruces evaluables | Win rate: ${evalResult.winRate?.toFixed(2)}% | Control aleatorio: ${controlWinRate?.toFixed(2)}% | Edge: ${edge !== null ? (edge >= 0 ? '+' : '') + edge.toFixed(2) : 'N/A'}%`);
+    }
+  }
+
+  console.log('\n\n========== RESUMEN FINAL ==========\n');
+  console.table(summary.map((s) => ({
+    Timeframe: s.timeframe,
+    Lookback: s.lookback,
+    'Cruces evaluados': s.totalCruces,
+    Aciertos: s.aciertos,
+    Fallos: s.fallos,
+    'Win Rate %': s.winRate !== null ? s.winRate.toFixed(2) : 'N/A',
+    'Control aleatorio %': s.controlWinRate !== null ? s.controlWinRate.toFixed(2) : 'N/A',
+    'Edge vs azar': s.edge !== null ? (s.edge >= 0 ? '+' : '') + s.edge.toFixed(2) : 'N/A',
+  })));
+
+  // Mejor combinación por timeframe, priorizando edge real sobre el azar
+  console.log('\n🏆 Mejor lookback por timeframe (según edge vs. control aleatorio):\n');
+  for (const timeframe of TIMEFRAMES) {
+    const options = summary.filter((s) => s.timeframe === timeframe && s.edge !== null);
+    if (!options.length) continue;
+    const best = options.reduce((a, b) => (b.edge > a.edge ? b : a));
+    console.log(`   ${timeframe}: lookback=${best.lookback} (win rate ${best.winRate.toFixed(2)}% vs control ${best.controlWinRate.toFixed(2)}% → edge ${best.edge >= 0 ? '+' : ''}${best.edge.toFixed(2)}%, ${best.totalCruces} cruces)`);
+  }
+
+  console.log('\n⚠️  NOTA: con muestras pequeñas (<30 cruces), un edge positivo puede seguir siendo ruido estadístico.');
+  console.log('   Trata estos resultados como orientativos, no como confirmación definitiva.');
+}
+
+main().catch((err) => {
+  console.error('Error ejecutando el backtest:', err);
+  process.exit(1);
+});
