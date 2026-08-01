@@ -1,6 +1,10 @@
 /**
- * Backtest: comparación de pivotLookback (20 / 50 / 100) para el indicador
- * de ángulos de Gann, sobre BTC/USDT en 1H, 4H y 1D.
+ * Backtest: comparación de pivotLookback (10/20/30/50/100) para el indicador
+ * de ángulos de Gann, sobre BTC/USDT en Diario (1D) y Semanal (1W).
+ *
+ * Incluye un control aleatorio: por cada combinación, genera cruces al azar
+ * del mismo tamaño de muestra y calcula su win rate, para poder comparar
+ * si el Gann realmente aporta un "edge" por encima del puro azar.
  *
  * Uso:
  *   node backtest_gann_lookback.js
@@ -25,10 +29,10 @@
  */
 
 const SYMBOL = 'BTCUSDT';
-const TIMEFRAMES = ['1h', '4h', '1d'];
-const LOOKBACKS = [20, 50, 100];
-const FORWARD_BARS = 10; // barras hacia adelante para evaluar si el cruce "acertó"
-const BARS_TO_FETCH = 3000; // barras históricas a descargar por timeframe
+const TIMEFRAMES = ['1d', '1w'];
+const LOOKBACKS = [10, 20, 30, 50, 100];
+const FORWARD_BARS_BY_TF = { '1d': 10, '1w': 4 }; // ~10 días / ~4 semanas hacia adelante
+const BARS_TO_FETCH_BY_TF = { '1d': 3000, '1w': 450 }; // 1D: ~8 años. 1W: todo el histórico disponible
 
 // ---------------------------------------------------------------------
 // 1. Descarga de datos históricos de Binance (paginado, sin API key)
@@ -39,7 +43,7 @@ async function fetchKlines(symbol, interval, totalBars) {
   let endTime = Date.now();
 
   while (allKlines.length < totalBars) {
-   const url = `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}&endTime=${endTime}`;
+    const url = `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}&endTime=${endTime}`;
     const res = await fetch(url);
     if (!res.ok) {
       throw new Error(`Error Binance API: ${res.status} ${res.statusText}`);
@@ -181,19 +185,54 @@ function evaluateCrosses(candles, crosses, forwardBars) {
 }
 
 // ---------------------------------------------------------------------
+// 4b. Control aleatorio: genera N "cruces" en índices e direcciones al
+//    azar (mismo tamaño de muestra que los cruces reales) y calcula su
+//    win rate. Sirve para saber si el resultado de Gann supera al azar.
+// ---------------------------------------------------------------------
+function randomControlWinRate(candles, sampleSize, forwardBars, iterations = 500) {
+  const minIndex = 1;
+  const maxIndex = candles.length - forwardBars - 1;
+  if (maxIndex <= minIndex || sampleSize <= 0) return null;
+
+  const rates = [];
+
+  for (let iter = 0; iter < iterations; iter++) {
+    let wins = 0;
+    for (let n = 0; n < sampleSize; n++) {
+      const idx = minIndex + Math.floor(Math.random() * (maxIndex - minIndex));
+      const direction = Math.random() < 0.5 ? 'ALCISTA' : 'BAJISTA';
+      const priceChange = candles[idx + forwardBars].close - candles[idx].close;
+      const isWin = direction === 'ALCISTA' ? priceChange > 0 : priceChange < 0;
+      if (isWin) wins++;
+    }
+    rates.push((wins / sampleSize) * 100);
+  }
+
+  const avg = rates.reduce((a, b) => a + b, 0) / rates.length;
+  return avg;
+}
+
+// ---------------------------------------------------------------------
 // 5. Main
 // ---------------------------------------------------------------------
 async function main() {
   const summary = [];
 
   for (const timeframe of TIMEFRAMES) {
+    const barsToFetch = BARS_TO_FETCH_BY_TF[timeframe];
+    const forwardBars = FORWARD_BARS_BY_TF[timeframe];
+
     console.log(`\n📊 Descargando datos ${SYMBOL} ${timeframe}...`);
-    const candles = await fetchKlines(SYMBOL, timeframe, BARS_TO_FETCH);
+    const candles = await fetchKlines(SYMBOL, timeframe, barsToFetch);
     console.log(`   ${candles.length} velas descargadas (${new Date(candles[0].time).toISOString()} → ${new Date(candles[candles.length - 1].time).toISOString()})`);
 
     for (const lookback of LOOKBACKS) {
       const crosses = simulateCrosses(candles, lookback);
-      const evalResult = evaluateCrosses(candles, crosses, FORWARD_BARS);
+      const evalResult = evaluateCrosses(candles, crosses, forwardBars);
+      const controlWinRate = randomControlWinRate(candles, evalResult.total, forwardBars);
+      const edge = evalResult.winRate !== null && controlWinRate !== null
+        ? evalResult.winRate - controlWinRate
+        : null;
 
       summary.push({
         timeframe,
@@ -202,33 +241,6 @@ async function main() {
         aciertos: evalResult.wins,
         fallos: evalResult.losses,
         winRate: evalResult.winRate,
+        controlWinRate,
+        edge,
       });
-
-      console.log(`   Lookback ${lookback}: ${evalResult.total} cruces evaluables | Win rate: ${evalResult.winRate?.toFixed(2)}%`);
-    }
-  }
-
-  console.log('\n\n========== RESUMEN FINAL ==========\n');
-  console.table(summary.map((s) => ({
-    Timeframe: s.timeframe,
-    Lookback: s.lookback,
-    'Cruces evaluados': s.totalCruces,
-    Aciertos: s.aciertos,
-    Fallos: s.fallos,
-    'Win Rate %': s.winRate !== null ? s.winRate.toFixed(2) : 'N/A',
-  })));
-
-  // Mejor combinación por timeframe
-  console.log('\n🏆 Mejor lookback por timeframe (según win rate):\n');
-  for (const timeframe of TIMEFRAMES) {
-    const options = summary.filter((s) => s.timeframe === timeframe && s.winRate !== null);
-    if (!options.length) continue;
-    const best = options.reduce((a, b) => (b.winRate > a.winRate ? b : a));
-    console.log(`   ${timeframe}: lookback=${best.lookback} (win rate ${best.winRate.toFixed(2)}%, ${best.totalCruces} cruces)`);
-  }
-}
-
-main().catch((err) => {
-  console.error('Error ejecutando el backtest:', err);
-  process.exit(1);
-});
