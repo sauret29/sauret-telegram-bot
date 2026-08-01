@@ -795,14 +795,19 @@ const BITGET_MAKER_FEE_PCT = 0.02;
 const BITGET_FUNDING_PCT_PER_8H = 0.01;
 const HORAS_POR_VELA_1H = 1;
 
-function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction, horasPorVela){
+function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction, horasPorVela, slPct){
   if(horasPorVela==null) horasPorVela = 1; // por defecto, velas de 1H (comportamiento anterior)
+  // slPct es OPCIONAL — si no se pasa (undefined/null), no hay stop loss,
+  // exactamente el comportamiento de siempre. Si se pasa, actúa como
+  // cortafuegos: un stop ANCHO pensado solo para cortar movimientos
+  // extremos (tipo 2021), no para gestionar el riesgo normal día a día.
   const n = s.n;
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
-  let position = null, entryPrice = null, tpPrice = null, entryIdx = null;
+  let position = null, entryPrice = null, tpPrice = null, slPrice = null, entryIdx = null;
   const trades = [];
   let peorOperacionPct = 0;
   let totalComisionesPct = 0, totalFundingPct = 0;
+  let cierresPorSL = 0;
 
   // El nocional (tamaño real de la posición en el exchange) es la porción
   // de capital arriesgada multiplicada por el apalancamiento — las
@@ -830,13 +835,15 @@ function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction,
     totalComisionesPct += comisionTotalPct;
     totalFundingPct += fundingPct;
     trades.push({ direction:position, equityChangePct:equityChange*100, entryIdx });
-    position = null; entryPrice = null; tpPrice = null; entryIdx = null;
+    position = null; entryPrice = null; tpPrice = null; slPrice = null; entryIdx = null;
   };
 
   for(let i=1;i<n;i++){
     if(position){
+      const hitSL = slPct!=null && (position==='long' ? s.lows[i] <= slPrice : s.highs[i] >= slPrice);
       const hitTP = position==='long' ? s.highs[i] >= tpPrice : s.lows[i] <= tpPrice;
-      if(hitTP){ closeTrade(tpPrice, BITGET_MAKER_FEE_PCT, entryIdx, i); }
+      if(hitSL){ cierresPorSL++; closeTrade(slPrice, BITGET_TAKER_FEE_PCT, entryIdx, i); }
+      else if(hitTP){ closeTrade(tpPrice, BITGET_MAKER_FEE_PCT, entryIdx, i); }
       else {
         const v = verdicts[i];
         const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
@@ -849,6 +856,7 @@ function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction,
         position = v==='COMPRAR' ? 'long' : 'short';
         entryPrice = s.closes[i];
         tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
+        slPrice = slPct!=null ? (position==='long' ? entryPrice*(1-slPct/100) : entryPrice*(1+slPct/100)) : null;
         entryIdx = i;
         // Comisión de entrada (taker), se descuenta ya mismo de la cuenta.
         const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
@@ -864,6 +872,7 @@ function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction,
   const grossLoss = Math.abs(trades.filter(t=>t.equityChangePct<=0).reduce((a,t)=>a+t.equityChangePct,0));
   return {
     trades: trades.length,
+    cierresPorSL,
     winRatePct: trades.length ? (wins/trades.length*100) : 0,
     totalReturnPct: (equity-1)*100,
     maxDrawdownPct: maxDrawdown*100,
@@ -1273,6 +1282,36 @@ async function main(){
     });
     const aniosPositivos = years.filter(y=>metricsForTradeSubset(buckets[y]).totalReturnPct>0).length;
     console.log('Años con retorno positivo: ' + aniosPositivos + ' de ' + years.length);
+  });
+
+  // ---------- ANÁLISIS N: SL ancho como cortafuegos ante movimientos extremos (tipo 2021) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS N — Stop Loss ANCHO como cortafuegos (no como gestión normal), señal en 4H con comisiones');
+  console.log('========================================');
+  console.log('El walk-forward mostró que 2021 perdió dinero con un % de acierto NORMAL, pero con');
+  console.log('pérdidas individuales enormes (sin SL, el precio se movió mucho en contra antes de que');
+  console.log('el veredicto cambiara). Aquí se prueba un SL muy ancho — pensado solo para cortar esos');
+  console.log('movimientos extremos, no para intervenir en el día a día — y se mide su efecto tanto en');
+  console.log('el conjunto como específicamente en 2021.');
+
+  const anchosSL = [15, 20, 25, 30, 40, 50]; // % de movimiento de PRECIO — muy ancho a propósito
+  console.log('\n--- TP 3% de precio, 12% capital (la configuración ganadora) ---');
+  console.log(pad('SL ancho',10) + padL('Operac.',9) + padL('Cierres/SL',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  // Referencia sin SL (ya la conocemos, pero se repite aquí para comparar en la misma tabla)
+  const rSinSL = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4);
+  console.log(pad('(sin SL)',10) + padL(rSinSL.trades,9) + padL('—',11) + padL(fmtPct(rSinSL.totalReturnPct),12) + padL('-'+rSinSL.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSinSL.profitFactor.toFixed(2),10));
+  anchosSL.forEach(sl=>{
+    const r = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4, sl);
+    console.log(pad('-'+sl+'%',10) + padL(r.trades,9) + padL(r.cierresPorSL,11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
+  });
+
+  console.log('\n--- Efecto específico en el año 2021 (el más afectado) ---');
+  console.log(pad('SL ancho',10) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  [null, 15, 20, 25, 30].forEach(sl=>{
+    const r = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4, sl);
+    const buckets2021 = r.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === 2021);
+    const m2021 = metricsForTradeSubset(buckets2021);
+    console.log(pad(sl==null?'(sin SL)':'-'+sl+'%',10) + padL(m2021.trades,9) + padL(fmtPct(m2021.totalReturnPct),12) + padL('-'+m2021.maxDrawdownPct.toFixed(1)+'%',11) + padL(m2021.profitFactor.toFixed(2),10));
   });
 
   console.log('\n=== Fin del backtest ===');
