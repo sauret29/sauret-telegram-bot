@@ -39,7 +39,7 @@ async function fetchKlines(symbol, interval, totalBars) {
   let endTime = Date.now();
 
   while (allKlines.length < totalBars) {
-    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}&endTime=${endTime}`;
+   const url = `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}&endTime=${endTime}`;
     const res = await fetch(url);
     if (!res.ok) {
       throw new Error(`Error Binance API: ${res.status} ${res.statusText}`);
