@@ -1239,6 +1239,42 @@ async function main(){
   console.log('fuera-de-muestra puro. Pero si el tramo reservado aguanta igual o mejor que el resto,');
   console.log('es una señal razonable de que la ventaja no depende solo de una parte antigua del histórico.');
 
+  // ---------- ANÁLISIS M: walk-forward — desglose año por año (todos fuera de muestra entre sí) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS M — Walk-forward: desglose por año calendario, señal en 4H con comisiones');
+  console.log('========================================');
+  console.log('En vez de un único tramo "reservado", aquí se parte TODO el histórico en años');
+  console.log('calendario y se calcula cada año POR SEPARADO (capital fresco, sin arrastrar nada');
+  console.log('de los años anteriores) — así vemos si la ventaja se sostiene año tras año, o si');
+  console.log('depende de uno o dos años concretos que están arrastrando la media hacia arriba.');
+
+  function bucketizeTradesByCalendarYear(tradeLog, times){
+    const buckets = {};
+    tradeLog.forEach(t=>{
+      const year = new Date(times[t.entryIdx]).getUTCFullYear();
+      if(!buckets[year]) buckets[year] = [];
+      buckets[year].push(t);
+    });
+    return buckets;
+  }
+
+  [
+    {label:'TP 3% de precio, 12% capital', tp:3, margin:0.12},
+    {label:'TP 15% de precio, 12% capital', tp:15, margin:0.12}
+  ].forEach(cfg=>{
+    console.log('\n--- ' + cfg.label + ' ---');
+    const rFull = simulateTradesNoSLConFees(s4H, verdicts4H, cfg.tp, LEVERAGE, cfg.margin, 4);
+    const buckets = bucketizeTradesByCalendarYear(rFull.tradeLog, s4H.times);
+    const years = Object.keys(buckets).map(Number).sort((a,b)=>a-b);
+    console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+    years.forEach(year=>{
+      const m = metricsForTradeSubset(buckets[year]);
+      console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    });
+    const aniosPositivos = years.filter(y=>metricsForTradeSubset(buckets[y]).totalReturnPct>0).length;
+    console.log('Años con retorno positivo: ' + aniosPositivos + ' de ' + years.length);
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
