@@ -1896,6 +1896,52 @@ async function main(){
     console.log(pad('Sin TP (veredicto)',20) + padL(rSinTP.total,8) + padL(rSinTP.ganadoras,11) + padL(fmtPct(rSinTP.mediaGan),12) + padL(rSinTP.perdedoras,12) + padL(fmtPct(rSinTP.mediaPer),12));
   });
 
+  // ---------- ANÁLISIS V: sin apalancamiento (1x) vs 5x, mismo 12% de capital ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS V — TP parcial SIN apalancamiento (1x) vs con 5x, mismo 12% de capital');
+  console.log('========================================');
+  console.log('Predicción antes de ver el resultado: el Profit Factor debería mantenerse muy similar');
+  console.log('(el apalancamiento se cancela matemáticamente en la proporción comisión/beneficio), pero');
+  console.log('el retorno total y el drawdown deberían reducirse aproximadamente 5 veces.');
+
+  const rSinApalancamiento = simulateConfluenciaTPParcial(s4H, sD, 3, 1, 0.12, 4, 0.5, false);
+
+  console.log('\n--- Comparación directa (12% de capital en los dos casos) ---');
+  console.log(pad('Variante',18) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Con 5x (actual)',18) + padL(rParcialSinBE.trades,9) + padL(rParcialSinBE.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rParcialSinBE.totalReturnPct),12) + padL('-'+rParcialSinBE.maxDrawdownPct.toFixed(1)+'%',11) + padL(rParcialSinBE.profitFactor.toFixed(2),10));
+  console.log(pad('Sin apalanc. (1x)',18) + padL(rSinApalancamiento.trades,9) + padL(rSinApalancamiento.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSinApalancamiento.totalReturnPct),12) + padL('-'+rSinApalancamiento.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSinApalancamiento.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Walk-forward año por año, sin apalancamiento (1x, 12% capital) ---');
+  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const bucketsSinApalancamiento = {};
+  rSinApalancamiento.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!bucketsSinApalancamiento[year]) bucketsSinApalancamiento[year] = [];
+    bucketsSinApalancamiento[year].push(t);
+  });
+  let aniosPositivosSinApalancamiento = 0, aniosTotalSinApalancamiento = 0;
+  Object.keys(bucketsSinApalancamiento).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(bucketsSinApalancamiento[year]);
+    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    aniosTotalSinApalancamiento++;
+    if(m.totalReturnPct>0) aniosPositivosSinApalancamiento++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivosSinApalancamiento + ' de ' + aniosTotalSinApalancamiento);
+
+  // ---------- ANÁLISIS W: barrido del reparto del TP parcial, sin apalancamiento ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS W — Barrido del reparto del TP parcial (1x, sin apalancamiento, 12% capital)');
+  console.log('========================================');
+  console.log('¿Es 50/50 realmente el mejor reparto, o hay una fracción distinta que funcione mejor');
+  console.log('ahora que no hay apalancamiento amplificando ni penalizando la elección?');
+
+  console.log('\n' + pad('% cerrado en TP',18) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10) + padL('Ret/DD',9));
+  [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8].forEach(fraccion=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, 1, 0.12, 4, fraccion, false);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad((fraccion*100)+'%',18) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10) + padL(retDD.toFixed(2),9));
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
