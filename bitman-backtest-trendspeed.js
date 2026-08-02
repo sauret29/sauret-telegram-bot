@@ -1936,7 +1936,7 @@ async function main(){
   console.log('ahora que no hay apalancamiento amplificando ni penalizando la elección?');
 
   console.log('\n' + pad('% cerrado en TP',18) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10) + padL('Ret/DD',9));
-  [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8].forEach(fraccion=>{
+  [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80].forEach(fraccion=>{
     const r = simulateConfluenciaTPParcial(s4H, sD, 3, 1, 0.12, 4, fraccion, false);
     const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
     console.log(pad((fraccion*100)+'%',18) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10) + padL(retDD.toFixed(2),9));
