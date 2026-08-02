@@ -1061,6 +1061,113 @@ function metricsForTradeSubset(tradeLog){
   };
 }
 
+// Confluencia en 4H con TAKE PROFIT PARCIAL: al tocar el TP (3% de precio),
+// cierra solo una FRACCIÓN de la posición (fraccionCierre) y deja correr el
+// resto con las reglas de salida normales (cambio de veredicto / cierre
+// forzado por Koncorde). Si protegerBreakeven=true, el resto además se
+// cierra si el precio vuelve al precio de entrada (breakeven), para que la
+// operación completa nunca pueda terminar en negativo tras haber cobrado
+// la parte parcial.
+function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela, fraccionCierre, protegerBreakeven){
+  const idxD = alignDailyIndex(seriesD, series4H.times);
+  const n = series4H.n;
+  let equity = 1.0, peak = 1.0, maxDrawdown = 0;
+  let position=null, entryPrice=null, tpPrice=null, entryIdx=null, tpParcialHecho=false, fraccionRestante=null, ultimoCierreIdx=null, equityAntesEntrada=null;
+  const trades = [];
+  const nocionalFraction = marginFraction * leverage;
+
+  function cerrarFraccion(fraccion, exitPrice, feePct, iExit, iDesde){
+    const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
+    const leveraged = rawReturn * leverage;
+    const comisionPct = (nocionalFraction*fraccion) * (feePct/100) * 100;
+    const horasAbierta = (iExit - iDesde) * horasPorVela;
+    const periodosFunding = Math.floor(horasAbierta / 8);
+    const fundingPct = (nocionalFraction*fraccion) * (BITGET_FUNDING_PCT_PER_8H/100) * periodosFunding * 100;
+    const equityChange = (marginFraction*fraccion) * leveraged - comisionPct/100 - fundingPct/100;
+    equity *= Math.max(0, 1 + equityChange);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
+  }
+
+  function cerrarOperacionCompleta(){
+    trades.push({ equityChangePct: (equity/equityAntesEntrada - 1)*100, entryIdx });
+    position=null; entryPrice=null; tpPrice=null; entryIdx=null; tpParcialHecho=false; equityAntesEntrada=null;
+  }
+
+  for(let i=1;i<n;i++){
+    const iD = idxD[i];
+    if(position){
+      if(!tpParcialHecho){
+        const hitTP = position==='long' ? series4H.highs[i] >= tpPrice : series4H.lows[i] <= tpPrice;
+        const forzado = position==='long' && !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
+        const v = verdicts4H_local(series4H, seriesD, i, iD);
+        const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+        if(hitTP){
+          // Cierra la fracción indicada al precio del TP, deja correr el resto.
+          cerrarFraccion(fraccionCierre, tpPrice, BITGET_MAKER_FEE_PCT, i, entryIdx);
+          tpParcialHecho = true; fraccionRestante = 1-fraccionCierre; ultimoCierreIdx = i;
+        } else if(forzado || !stillValid){
+          cerrarFraccion(1.0, series4H.closes[i], BITGET_TAKER_FEE_PCT, i, entryIdx);
+          cerrarOperacionCompleta();
+        }
+      } else {
+        // Ya se cobró la parte parcial — el resto corre con las reglas normales
+        // (y opcionalmente breakeven) hasta su propio cierre.
+        const forzado = position==='long' && !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
+        const v = verdicts4H_local(series4H, seriesD, i, iD);
+        const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+        const hitBreakeven = protegerBreakeven && (position==='long' ? series4H.lows[i] <= entryPrice : series4H.highs[i] >= entryPrice);
+        if(hitBreakeven){
+          cerrarFraccion(fraccionRestante, entryPrice, BITGET_TAKER_FEE_PCT, i, ultimoCierreIdx);
+          cerrarOperacionCompleta();
+        } else if(forzado || !stillValid){
+          cerrarFraccion(fraccionRestante, series4H.closes[i], BITGET_TAKER_FEE_PCT, i, ultimoCierreIdx);
+          cerrarOperacionCompleta();
+        }
+      }
+    }
+    if(!position){
+      const v = verdicts4H_local(series4H, seriesD, i, iD);
+      if(v==='COMPRAR' || v==='VENDER'){
+        position = v==='COMPRAR' ? 'long' : 'short';
+        entryPrice = series4H.closes[i];
+        tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
+        entryIdx = i; tpParcialHecho=false; equityAntesEntrada=equity;
+        const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
+        equity *= Math.max(0, 1 - comisionEntradaPct/100);
+      }
+    }
+  }
+  if(position){
+    const fraccionFinal = tpParcialHecho ? fraccionRestante : 1.0;
+    const desde = tpParcialHecho ? ultimoCierreIdx : entryIdx;
+    cerrarFraccion(fraccionFinal, series4H.closes[n-1], BITGET_TAKER_FEE_PCT, n-1, desde);
+    cerrarOperacionCompleta();
+  }
+
+  const wins = trades.filter(t=>t.equityChangePct>0).length;
+  const grossGain = trades.filter(t=>t.equityChangePct>0).reduce((a,t)=>a+t.equityChangePct,0);
+  const grossLoss = Math.abs(trades.filter(t=>t.equityChangePct<=0).reduce((a,t)=>a+t.equityChangePct,0));
+  return {
+    trades: trades.length,
+    winRatePct: trades.length ? (wins/trades.length*100) : 0,
+    totalReturnPct: (equity-1)*100,
+    maxDrawdownPct: maxDrawdown*100,
+    profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0),
+    tradeLog: trades
+  };
+}
+// Réplica exacta de la lógica de veredicto de buildVerdicts4H, pero evaluada
+// para una sola vela (necesaria dentro del simulador de TP parcial).
+function verdicts4H_local(series4H, seriesD, i, iD){
+  const aoAlcista = series4H.aoState[i]==='Alcista', aoBajista = series4H.aoState[i]==='Bajista';
+  const dailyBullish = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+  const dailyBearish = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+  let comprarOk = aoAlcista && series4H.adxSubiendo[i] && series4H.koBull[i] && dailyBullish;
+  let venderOk  = aoBajista && series4H.adxSubiendo[i] && series4H.koBear[i] && dailyBearish;
+  return comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
+}
+
 function pad(str, len){ str=String(str); return str.length>=len ? str : str + ' '.repeat(len-str.length); }
 
 function padL(str, len){ str=String(str); return str.length>=len ? str : ' '.repeat(len-str.length) + str; }
@@ -1655,6 +1762,41 @@ async function main(){
     const mayorParte = subset.filter(o=>o.fraccionPositiva>0.5).length;
     console.log(pad(motivo,12) + padL(subset.length,8) + padL(positivas+' ('+(positivas/subset.length*100).toFixed(0)+'%)',10) + padL(mayorParte+' ('+(mayorParte/subset.length*100).toFixed(0)+'%)',15));
   });
+
+  // ---------- ANÁLISIS R: TP parcial (50%) con y sin protección a breakeven ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS R — TP parcial (50%) al 3%, con y sin protección a breakeven, señal en 4H con comisiones');
+  console.log('========================================');
+  console.log('Al tocar el TP, cierra solo el 50% de la posición y deja correr el resto con las reglas');
+  console.log('normales de salida. La versión "con breakeven" además protege el resto cerrándolo si el');
+  console.log('precio vuelve al precio de entrada, para que la operación completa nunca acabe en negativo.');
+
+  console.log('\n--- Comparación directa (12% de capital) ---');
+  console.log(pad('Variante',24) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const rBase = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4);
+  const rParcialSinBE = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.5, false);
+  const rParcialConBE = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.5, true);
+  console.log(pad('TP completo (actual)',24) + padL(rBase.trades,9) + padL(rBase.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rBase.totalReturnPct),12) + padL('-'+rBase.maxDrawdownPct.toFixed(1)+'%',11) + padL(rBase.profitFactor.toFixed(2),10));
+  console.log(pad('TP parcial 50%, sin BE',24) + padL(rParcialSinBE.trades,9) + padL(rParcialSinBE.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rParcialSinBE.totalReturnPct),12) + padL('-'+rParcialSinBE.maxDrawdownPct.toFixed(1)+'%',11) + padL(rParcialSinBE.profitFactor.toFixed(2),10));
+  console.log(pad('TP parcial 50%, con BE',24) + padL(rParcialConBE.trades,9) + padL(rParcialConBE.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rParcialConBE.totalReturnPct),12) + padL('-'+rParcialConBE.maxDrawdownPct.toFixed(1)+'%',11) + padL(rParcialConBE.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Barrido de capital, TP parcial CON breakeven ---');
+  console.log(pad('% capital usado',18) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  [2,4,8,12,20].forEach(marginPct=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, marginPct/100, 4, 0.5, true);
+    console.log(pad(marginPct+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
+  });
+
+  console.log('\n--- Año por año: las tres variantes (12% capital) ---');
+  console.log(pad('Año',8) + padL('PF Actual',11) + padL('PF Sin BE',11) + padL('PF Con BE',11) + padL('Ret Actual',13) + padL('Ret Con BE',13));
+  for(let year=2017; year<=2026; year++){
+    const bA = rBase.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    const bS = rParcialSinBE.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    const bC = rParcialConBE.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    if(bA.length===0 && bS.length===0 && bC.length===0) continue;
+    const mA = metricsForTradeSubset(bA), mS = metricsForTradeSubset(bS), mC = metricsForTradeSubset(bC);
+    console.log(pad(String(year),8) + padL(mA.profitFactor.toFixed(2),11) + padL(mS.profitFactor.toFixed(2),11) + padL(mC.profitFactor.toFixed(2),11) + padL(fmtPct(mA.totalReturnPct),13) + padL(fmtPct(mC.totalReturnPct),13));
+  }
 
   console.log('\n=== Fin del backtest ===');
 }
