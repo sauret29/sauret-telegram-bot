@@ -1,19 +1,27 @@
 // ============================================================
-// Bitman · Backtest — Trend Speed Analyzer en solitario (solo largos)
+// Bitman · Backtest (análisis manual, NO se ejecuta cada 15 min)
 // ------------------------------------------------------------
-// Estrategia deliberadamente simple, sin Koncorde/AO/ADX de por medio:
-//   - Abre LARGO cuando el precio cierra por ENCIMA de la EMA dinámica
-//     del Trend Speed Analyzer (cruce alcista).
-//   - Cierra el largo cuando una vela cierra por DEBAJO de esa misma
-//     línea. Sin Take Profit, sin Stop Loss — el único gatillo es la
-//     propia línea dinámica.
-// Se prueba en 1H, 4H y Diario por separado. Comisiones y funding
-// reales de Bitget incluidos desde el principio, con position sizing.
+// Dos análisis con datos reales de Binance sobre los últimos
+// MESES_HISTORICO meses en temporalidad 1H, apalancamiento 5x:
+//
+//  A) Compara 4 formas de exigir (o no) el ADX en la entrada,
+//     para ver cuál reduce el retraso sin disparar las señales
+//     falsas, usando SL fijo y TP fijo.
+//  B) Con la lógica ACTUAL (ADX estricto, la que ya usa el bot
+//     en vivo), prueba una rejilla de combinaciones de Stop
+//     Loss / Take Profit para ver cuál da mejor relación
+//     riesgo/beneficio.
+//
+// Solo lee datos públicos de Binance — no opera, no necesita
+// credenciales de Telegram, no toca state.json ni el bot real.
+// Los resultados se imprimen en el log de esta ejecución.
 // ============================================================
 
 const MESES_HISTORICO = parseInt(process.env.MESES_HISTORICO || '6', 10);
 const MESES_RESERVADOS = parseInt(process.env.MESES_RESERVADOS || '12', 10);
 const LEVERAGE = 5;
+const SL_DEFAULT_PCT = 5;   // %
+const TP_DEFAULT_PCT = 15;  // %
 
 const SYMBOL = process.env.SYMBOL || 'BTCUSDT';
 const HOSTS = [
@@ -40,8 +48,14 @@ async function fetchKlinesRaw(interval, limit, endTime){
   throw lastError || new Error('No se pudo contactar Binance');
 }
 
+// Descarga velas 1H hasta cubrir MESES_HISTORICO meses + margen extra,
+// paginando hacia atrás. El margen (~3000 velas) es necesario para que
+// el ML RSI tenga su ventana completa de clustering ya disponible desde
+// el PRIMER día del periodo analizado (no solo al final) — si no,
+// las primeras semanas del backtest usarían un ML RSI "mal calentado",
+// con menos historial del que tendría en una situación real.
 async function fetchCandlesForMonths(interval, months, warmupMargin){
-  if(warmupMargin==null) warmupMargin = 300;
+  if(warmupMargin==null) warmupMargin = 3050; // por defecto, margen para el ML RSI (solo se usa en 1H)
   const msPerCandle = { '1h': 3600000, '4h': 14400000, '1d': 86400000 }[interval] || 3600000;
   const monthsCandles = Math.ceil((months * 30 * 86400000) / msPerCandle);
   const targetCandles = monthsCandles + warmupMargin;
@@ -72,19 +86,8 @@ async function fetchCandlesForMonths(interval, months, warmupMargin){
 }
 
 // ============================================================
-// MOTOR DEL TREND SPEED ANALYZER (ya construido y probado antes)
+// MOTOR DE INDICADORES (copia exacta del bot de alertas)
 // ============================================================
-
-// Función auxiliar que el motor necesita (máximo móvil sobre 'period' velas)
-function highestPeriod(values,period){
-  const out=new Array(values.length).fill(NaN);
-  for(let i=0;i<values.length;i++){
-    if(i>=period-1) out[i]=Math.max(...values.slice(i-period+1,i+1));
-  }
-  return out;
-}
-
-// ---------- AO + ADX (motor ya validado en la Confluencia) ----------
 function safeDiv(a,b){
   if(b===0||b==null||a==null||isNaN(a)||isNaN(b)) return 0;
   const r=a/b; return isFinite(r)?r:0;
@@ -102,6 +105,171 @@ function sma(values,period){
     if(i>=period-1 && count===period) out[i]=sum/period;
   }
   return out;
+}
+function ema(values,period){
+  const out=new Array(values.length).fill(NaN);
+  const k=2/(period+1); let seeded=false, prev=NaN;
+  for(let i=0;i<values.length;i++){
+    if(values[i]==null||isNaN(values[i])){ out[i]=prev; continue; }
+    if(!seeded){ prev=values[i]; out[i]=prev; seeded=true; }
+    else { prev=values[i]*k+prev*(1-k); out[i]=prev; }
+  }
+  return out;
+}
+function stdevPop(values,period){
+  const out=new Array(values.length).fill(NaN);
+  for(let i=0;i<values.length;i++){
+    if(i>=period-1){
+      const slice=values.slice(i-period+1,i+1);
+      const mean=slice.reduce((a,b)=>a+b,0)/period;
+      const varr=slice.reduce((a,b)=>a+(b-mean)*(b-mean),0)/period;
+      out[i]=Math.sqrt(Math.max(varr,0));
+    }
+  }
+  return out;
+}
+function highestPeriod(values,period){
+  const out=new Array(values.length).fill(NaN);
+  for(let i=0;i<values.length;i++){
+    if(i>=period-1) out[i]=Math.max(...values.slice(i-period+1,i+1));
+  }
+  return out;
+}
+function lowestPeriod(values,period){
+  const out=new Array(values.length).fill(NaN);
+  for(let i=0;i<values.length;i++){
+    if(i>=period-1) out[i]=Math.min(...values.slice(i-period+1,i+1));
+  }
+  return out;
+}
+function rsiWilder(values,period){
+  const out=new Array(values.length).fill(NaN);
+  let avgGain=0, avgLoss=0;
+  for(let i=1;i<values.length;i++){
+    const change=values[i]-values[i-1];
+    const gain=change>0?change:0, loss=change<0?-change:0;
+    if(i<=period){
+      avgGain+=gain; avgLoss+=loss;
+      if(i===period){
+        avgGain/=period; avgLoss/=period;
+        const rs=safeDiv(avgGain,avgLoss);
+        out[i]=avgLoss===0?100:(100-safeDiv(100,(1+rs)));
+      }
+    } else {
+      avgGain=(avgGain*(period-1)+gain)/period;
+      avgLoss=(avgLoss*(period-1)+loss)/period;
+      const rs=safeDiv(avgGain,avgLoss);
+      out[i]=avgLoss===0?100:(100-safeDiv(100,(1+rs)));
+    }
+  }
+  return out;
+}
+// ---------- ML RSI [BackQuant] ----------
+// Réplica fiel del indicador de TradingView: RSI(14) de Wilder, suavizado con
+// EMA(4), y umbrales dinámicos calculados con clustering k-means (3 grupos)
+// sobre la ventana de RSI reciente (hasta 3000 valores). El centro del grupo
+// más alto es el umbral verde (alcista); el del más bajo, el rojo (bajista).
+// Solo se calcula para la última vela (no hace falta el histórico completo
+// para decidir el veredicto actual, y así se evita recalcular el clustering
+// en cada barra, que sería muy costoso).
+function percentileLinearInterpolation(sortedArr, p){
+  const n = sortedArr.length;
+  if(n===0) return NaN;
+  if(n===1) return sortedArr[0];
+  const rank = (p/100)*(n-1);
+  const lower = Math.floor(rank), upper = Math.ceil(rank);
+  const frac = rank - lower;
+  if(upper>=n) return sortedArr[n-1];
+  return sortedArr[lower] + (sortedArr[upper]-sortedArr[lower])*frac;
+}
+function kmeans1D(values, maxIter){
+  const sorted = values.slice().sort((a,b)=>a-b);
+  let centroids = [
+    percentileLinearInterpolation(sorted,25),
+    percentileLinearInterpolation(sorted,50),
+    percentileLinearInterpolation(sorted,75)
+  ];
+  for(let iter=0; iter<=maxIter; iter++){
+    const clusters=[[],[],[]];
+    for(const v of values){
+      let bestIdx=0, bestDist=Infinity;
+      for(let c=0;c<3;c++){
+        const d=Math.abs(v-centroids[c]);
+        if(d<bestDist){ bestDist=d; bestIdx=c; }
+      }
+      clusters[bestIdx].push(v);
+    }
+    const newCentroids = centroids.map((old,idx)=> clusters[idx].length ? clusters[idx].reduce((a,b)=>a+b,0)/clusters[idx].length : old);
+    const same = newCentroids.every((c,idx)=>c===centroids[idx]);
+    centroids = newCentroids;
+    if(same) break;
+  }
+  return centroids; // [centroide bajo, centroide medio, centroide alto]
+}
+function computeMLRSI(closes, opts){
+  opts = opts || {};
+  const length = opts.length || 14;
+  const smoothPeriod = opts.smoothPeriod || 4;
+  const maxData = opts.maxData || 3000;
+  const maxIter = opts.maxIter || 1000;
+
+  const rsiRaw = rsiWilder(closes, length);
+  const rsiSmoothed = ema(rsiRaw, smoothPeriod);
+
+  const validIdx = [];
+  for(let i=0;i<rsiSmoothed.length;i++){
+    if(!isNaN(rsiSmoothed[i])) validIdx.push(i);
+  }
+  const windowIdx = validIdx.slice(-maxData);
+  const values = windowIdx.map(i=>rsiSmoothed[i]);
+
+  if(values.length < 3){
+    return { rsi:NaN, longThreshold:NaN, shortThreshold:NaN, signal:'Sin datos' };
+  }
+
+  const centroids = kmeans1D(values, maxIter);
+  const longS = centroids[2], shortS = centroids[0];
+  const lastRsi = rsiSmoothed[rsiSmoothed.length-1];
+
+  let signal = 'Neutral';
+  if(!isNaN(lastRsi)){
+    if(lastRsi > longS) signal = 'Alcista';
+    else if(lastRsi < shortS) signal = 'Bajista';
+  }
+  return { rsi:lastRsi, longThreshold:longS, shortThreshold:shortS, signal };
+}
+function formatMLRSI(mlRsi){
+  if(!mlRsi || isNaN(mlRsi.rsi)) return 'ML RSI: sin datos suficientes todavía.';
+  if(mlRsi.signal==='Alcista') return 'ML RSI: Alcista ('+mlRsi.rsi.toFixed(1)+' cruzó por encima del umbral verde '+mlRsi.longThreshold.toFixed(1)+').';
+  if(mlRsi.signal==='Bajista') return 'ML RSI: Bajista ('+mlRsi.rsi.toFixed(1)+' cruzó por debajo del umbral rojo '+mlRsi.shortThreshold.toFixed(1)+').';
+  return 'ML RSI: Neutral ('+mlRsi.rsi.toFixed(1)+', entre '+mlRsi.shortThreshold.toFixed(1)+' y '+mlRsi.longThreshold.toFixed(1)+').';
+}
+
+function mfiTypical(highs,lows,closes,volumes,period,typicalArr){
+  const n=closes.length;
+  const typical = typicalArr || highs.map((h,i)=>(h+lows[i]+closes[i])/3);
+  const rawFlow = typical.map((tp,i)=>tp*volumes[i]);
+  const out=new Array(n).fill(NaN);
+  for(let i=period;i<n;i++){
+    let pos=0,neg=0;
+    for(let j=i-period+1;j<=i;j++){
+      if(j===0) continue;
+      if(typical[j]>typical[j-1]) pos+=rawFlow[j];
+      else if(typical[j]<typical[j-1]) neg+=rawFlow[j];
+    }
+    if(neg===0) out[i]=100;
+    else { const mr=safeDiv(pos,neg); out[i]=100-safeDiv(100,(1+mr)); }
+  }
+  return out;
+}
+function stochasticSmoothed(source,highs,lows,period,smoothPeriod){
+  const n=source.length;
+  const hh=highestPeriod(highs,period), ll=lowestPeriod(lows,period);
+  const k=new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    if(!isNaN(hh[i])&&!isNaN(ll[i])) k[i]=safeDiv((source[i]-ll[i])*100,(hh[i]-ll[i]));
+  }
+  return sma(k,smoothPeriod);
 }
 function awesomeOscillator(highs,lows){
   const n=highs.length;
@@ -148,179 +316,593 @@ function adxWilder(highs,lows,closes,period){
   }
   return {adx,plusDI,minusDI};
 }
-// Clasificación estándar (1 vela de lookback, la misma que usa toda la sesión)
-function computeAoAdxState(highs,lows,closes){
+
+function atrWilder(highs, lows, closes, period){
   const n=closes.length;
-  const ao = awesomeOscillator(highs,lows);
-  const {adx} = adxWilder(highs,lows,closes,14);
-  const aoState = new Array(n).fill('Sin datos');
-  const adxSubiendo = new Array(n).fill(false);
+  const tr=new Array(n).fill(0);
   for(let i=1;i<n;i++){
-    if(!isNaN(ao[i]) && !isNaN(ao[i-1])){
-      const subiendo = ao[i] > ao[i-1];
-      if(ao[i]>=0 && subiendo) aoState[i]='Alcista';
-      else if(ao[i]>=0 && !subiendo) aoState[i]='Retroceso alcista';
-      else if(ao[i]<0 && !subiendo) aoState[i]='Bajista';
+    tr[i]=Math.max(highs[i]-lows[i], Math.abs(highs[i]-closes[i-1]), Math.abs(lows[i]-closes[i-1]));
+  }
+  const atr=new Array(n).fill(NaN);
+  let sum=0;
+  for(let i=1;i<=period && i<n;i++) sum+=tr[i];
+  if(period<n) atr[period]=sum/period;
+  for(let i=period+1;i<n;i++){
+    atr[i]=(atr[i-1]*(period-1)+tr[i])/period;
+  }
+  return atr;
+}
+function bbwpSeries(closes,bandPeriod,lookback){
+  const n=closes.length;
+  const base=sma(closes,bandPeriod), dev=stdevPop(closes,bandPeriod);
+  const width=new Array(n).fill(NaN);
+  for(let i=0;i<n;i++) if(!isNaN(base[i])&&!isNaN(dev[i])) width[i]=safeDiv(2*dev[i],base[i]);
+  const out=new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    if(isNaN(width[i])) continue;
+    const start=Math.max(0,i-lookback+1);
+    let count=0,total=0;
+    for(let j=start;j<=i;j++){
+      if(isNaN(width[j])) continue;
+      total++; if(width[j]<=width[i]) count++;
+    }
+    out[i]=total>0?(count/total)*100:NaN;
+  }
+  return out;
+}
+
+/* =========================================================
+   KONCORDE PLUS (fórmula exacta Bitman)
+========================================================= */
+function koncordePlus(opens,highs,lows,closes,volumes){
+  const n=closes.length;
+  const tprice=opens.map((o,i)=>(o+highs[i]+lows[i]+closes[i])/4); // ohlc4
+  const hlc3=highs.map((h,i)=>(h+lows[i]+closes[i])/3);
+
+  const pvi=new Array(n).fill(1000), nvi=new Array(n).fill(1000);
+  for(let i=1;i<n;i++){
+    const deltaPct=safeDiv(closes[i]-closes[i-1],closes[i-1]);
+    if(volumes[i]>volumes[i-1]){ pvi[i]=pvi[i-1]+deltaPct*pvi[i-1]; nvi[i]=nvi[i-1]; }
+    else if(volumes[i]<volumes[i-1]){ nvi[i]=nvi[i-1]+deltaPct*nvi[i-1]; pvi[i]=pvi[i-1]; }
+    else { pvi[i]=pvi[i-1]; nvi[i]=nvi[i-1]; }
+  }
+  const pvim=ema(pvi,15), nvim=ema(nvi,15);
+  const hiPvim=highestPeriod(pvim,90), loPvim=lowestPeriod(pvim,90);
+  const hiNvim=highestPeriod(nvim,90), loNvim=lowestPeriod(nvim,90);
+  const oscp=new Array(n).fill(NaN), azul=new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    oscp[i]=safeDiv((pvi[i]-pvim[i])*100,(hiPvim[i]-loPvim[i]));
+    azul[i]=safeDiv((nvi[i]-nvim[i])*100,(hiNvim[i]-loNvim[i]));
+  }
+
+  const basisBB=sma(tprice,25), devBB=stdevPop(tprice,25);
+  const oscBB=new Array(n).fill(NaN);
+  for(let i=0;i<n;i++) oscBB[i]=safeDiv((tprice[i]-basisBB[i])*100,(4*devBB[i]));
+
+  const xrsi=rsiWilder(tprice,14);
+  const xmf=mfiTypical(highs,lows,closes,volumes,14,hlc3);
+  const stoc=stochasticSmoothed(tprice,highs,lows,21,3);
+
+  const tendencia=new Array(n).fill(NaN); // marrón / Trend
+  const pececillos=new Array(n).fill(NaN); // verde
+  for(let i=0;i<n;i++){
+    const parts=[xrsi[i],xmf[i],oscBB[i], isNaN(stoc[i])?NaN:stoc[i]/3];
+    if(parts.some(p=>p==null||isNaN(p))) continue;
+    tendencia[i]=(xrsi[i]+xmf[i]+oscBB[i]+stoc[i]/3)/2;
+    pececillos[i]=tendencia[i]+(isNaN(oscp[i])?0:oscp[i]);
+  }
+  const maTrend=ema(tendencia,15);
+  const konVal=new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    if(isNaN(tendencia[i])||isNaN(pececillos[i])) continue;
+    const mx=Math.max(pececillos[i],tendencia[i]);
+    konVal[i]= mx<0 ? Math.min(pececillos[i],tendencia[i]) : mx;
+  }
+  return {tprice,hlc3,oscp,azul,oscBB,xrsi,xmf,stoc,tendencia,pececillos,maTrend,konVal};
+}
+
+/* =========================================================
+   PIPELINE DE SERIES COMPLETAS
+========================================================= */
+function computeFullSeries(ohlcv){
+  const {opens,highs,lows,closes,volumes,times}=ohlcv;
+  const n=closes.length;
+  const ao=awesomeOscillator(highs,lows);
+  const {adx,plusDI,minusDI}=adxWilder(highs,lows,closes,14);
+  const atr=atrWilder(highs,lows,closes,14);
+  const bbwp=bbwpSeries(closes,13,252);
+  const konc=koncordePlus(opens,highs,lows,closes,volumes);
+
+  const aoState=new Array(n).fill('Sin datos');
+  const adxSubiendo=new Array(n).fill(false);
+  const koBull=new Array(n).fill(false), koBear=new Array(n).fill(false), koAbove=new Array(n).fill(false);
+
+  for(let i=1;i<n;i++){
+    if(!isNaN(ao[i])&&!isNaN(ao[i-1])){
+      const subiendo=ao[i]>ao[i-1];
+      if(ao[i]>=0&&subiendo) aoState[i]='Alcista';
+      else if(ao[i]>=0&&!subiendo) aoState[i]='Retroceso alcista';
+      else if(ao[i]<0&&!subiendo) aoState[i]='Bajista';
       else aoState[i]='Retroceso bajista';
     }
-    if(!isNaN(adx[i]) && !isNaN(adx[i-1])) adxSubiendo[i] = adx[i] > adx[i-1];
+    if(!isNaN(adx[i])&&!isNaN(adx[i-1])) adxSubiendo[i]=adx[i]>adx[i-1];
+    if(!isNaN(konc.konVal[i])){
+      koBull[i]=konc.konVal[i]>0;
+      koBear[i]=konc.konVal[i]<0;
+      if(!isNaN(konc.maTrend[i])) koAbove[i]=konc.konVal[i]>konc.maTrend[i];
+    }
   }
-  return { ao, adx, aoState, adxSubiendo };
+
+  return {
+    n, times, opens, highs, lows, closes, volumes,
+    ao, adx, plusDI, minusDI, atr, bbwp,
+    oscp:konc.oscp, azul:konc.azul, tendencia:konc.tendencia, pececillos:konc.pececillos,
+    maTrend:konc.maTrend, konVal:konc.konVal,
+    aoState, adxSubiendo, koBull, koBear, koAbove
+  };
 }
 
-// ============================================================
-// TREND SPEED ANALYZER [Zeiierman] — motor replicado del Pine
-// ============================================================
-
-// RMA de Wilder (igual que ta.rma): semilla = SMA de los primeros 'period'
-// valores, luego suavizado recursivo con peso 1/period.
-function rma(values, period){
-  const out = new Array(values.length).fill(NaN);
-  let sum = 0;
-  for(let i=0;i<values.length;i++){
-    if(i < period){
-      sum += values[i];
-      if(i === period-1) out[i] = sum/period;
-    } else {
-      out[i] = (out[i-1]*(period-1) + values[i]) / period;
-    }
+// Alinea una serie de temporalidad mayor (4H o Diario) contra los timestamps
+// de una serie menor (1H): para cada vela de 1H, devuelve el ÍNDICE de la
+// última vela de la temporalidad mayor que ya había cerrado en ese momento
+// (misma función que usa el bot en vivo para su puerta diaria del modo Pro).
+function alignDailyIndex(dailySeries, targetTimes){
+  const dTimes=dailySeries.times;
+  const out=new Array(targetTimes.length).fill(-1);
+  let j=0;
+  for(let i=0;i<targetTimes.length;i++){
+    while(j+1<dTimes.length && dTimes[j+1]<=targetTimes[i]) j++;
+    if(dTimes[j]<=targetTimes[i]) out[i]=j;
   }
   return out;
 }
 
-// Media móvil ponderada linealmente (igual que ta.wma): el peso más alto
-// es para el dato más reciente dentro de la ventana.
-function wma(values, period){
-  const out = new Array(values.length).fill(NaN);
-  const denom = period*(period+1)/2;
-  for(let i=0;i<values.length;i++){
-    if(i >= period-1){
-      let sum = 0;
-      for(let k=0;k<period;k++){
-        // values[i-k] es el dato "k pasos atrás"; peso = period-k (el más
-        // reciente, k=0, pesa 'period'; el más antiguo, k=period-1, pesa 1).
-        sum += values[i-k] * (period-k);
+// Construye las "puertas" de confluencia: para cada vela de 1H, si la ÚLTIMA
+// vela cerrada de 4H o de Diario (la que sea) confirma tendencia alcista
+// (AO Alcista Y Koncorde>media), la puerta alcista queda abierta esa vela;
+// igual para bajista. Solo hace falta que UNA de las dos confirme (OR).
+function buildConfluenceGates(series1H, series4H, seriesD){
+  const idx4H = alignDailyIndex(series4H, series1H.times);
+  const idxD = alignDailyIndex(seriesD, series1H.times);
+  const n = series1H.n;
+  const bull4 = new Array(n).fill(false), bear4 = new Array(n).fill(false);
+  const bullD = new Array(n).fill(false), bearD = new Array(n).fill(false);
+  // Señal COMPLETA del 4H (con ADX incluido, no solo AO+Koncorde) — se usa
+  // como generador de entradas propio en la variante "cascada" (Diario→4H→1H).
+  const bull4Full = new Array(n).fill(false), bear4Full = new Array(n).fill(false);
+  for(let i=0;i<n;i++){
+    const i4 = idx4H[i], iD = idxD[i];
+    bull4[i] = i4>=0 && series4H.aoState[i4]==='Alcista' && series4H.koBull[i4];
+    bear4[i] = i4>=0 && series4H.aoState[i4]==='Bajista' && series4H.koBear[i4];
+    bullD[i] = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+    bearD[i] = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+    bull4Full[i] = i4>=0 && series4H.aoState[i4]==='Alcista' && series4H.adxSubiendo[i4] && series4H.koBull[i4];
+    bear4Full[i] = i4>=0 && series4H.aoState[i4]==='Bajista' && series4H.adxSubiendo[i4] && series4H.koBear[i4];
+  }
+  // 'bullish'/'bearish' (con OR) se mantienen para no romper la variante ya usada.
+  const bullish = bull4.map((v,i)=>v||bullD[i]);
+  const bearish = bear4.map((v,i)=>v||bearD[i]);
+  return {bullish, bearish, bull4, bear4, bullD, bearD, bull4Full, bear4Full};
+}
+
+
+// Calcula el ML RSI para CADA vela de la serie (no solo la última),
+// necesario para poder simular la variante "ML RSI en vez de ADX"
+// a lo largo de todo el histórico. Es más costoso que en el bot en
+// vivo (que solo calcula la vela actual), pero al ser un análisis
+// manual de una sola vez, el tiempo extra no supone un problema.
+function computeMLRSISeries(closes){
+  const rsiRaw = rsiWilder(closes, 14);
+  const rsiSmoothed = ema(rsiRaw, 4);
+  const n = closes.length;
+  const signal = new Array(n).fill('Sin datos');
+  const validIdx = [];
+  for(let i=0;i<n;i++){
+    if(!isNaN(rsiSmoothed[i])){
+      validIdx.push(i);
+      const windowIdx = validIdx.slice(-3000);
+      const values = windowIdx.map(j=>rsiSmoothed[j]);
+      if(values.length >= 30){ // no merece la pena calcular clusters fiables con muy pocos datos
+        const centroids = kmeans1D(values, 1000);
+        const longS = centroids[2], shortS = centroids[0];
+        if(rsiSmoothed[i] > longS) signal[i]='Alcista';
+        else if(rsiSmoothed[i] < shortS) signal[i]='Bajista';
+        else signal[i]='Neutral';
       }
-      out[i] = sum/denom;
     }
   }
-  return out;
+  return signal;
 }
 
-// Hull Moving Average (igual que ta.hma): combina dos WMA de distinta
-// longitud y las vuelve a suavizar con una WMA de longitud sqrt(period).
-function hma(values, period){
-  const half = Math.floor(period/2);
-  const sqrtLen = Math.max(1, Math.round(Math.sqrt(period)));
-  const wmaHalf = wma(values, half);
-  const wmaFull = wma(values, period);
-  const diff = values.map((_, i) => {
-    if(isNaN(wmaHalf[i]) || isNaN(wmaFull[i])) return NaN;
-    return 2*wmaHalf[i] - wmaFull[i];
-  });
-  return wma(diff, sqrtLen);
-}
+// Verdicto por vela según la variante elegida. Todas comparten la
+// misma regla de cierre forzado por Koncorde (igual que el bot en
+// vivo) — lo único que cambia entre variantes es qué exige la
+// ENTRADA respecto al ADX (o su sustituto).
+function verdictAtVariant(s, i, variant, mlSignal, gates){
+  const aoAlcista = s.aoState[i]==='Alcista';
+  const aoBajista = s.aoState[i]==='Bajista';
+  const koBull = s.koBull[i], koBear = s.koBear[i];
+  const adxSubiendo = s.adxSubiendo[i];
+  const adxNoBajando = !isNaN(s.adx[i]) && !isNaN(s.adx[i-1]) && s.adx[i] >= s.adx[i-1];
+  const mlAlcista = mlSignal && mlSignal[i]==='Alcista';
+  const mlBajista = mlSignal && mlSignal[i]==='Bajista';
+  const gateBullish = gates && gates.bullish[i];
+  const gateBearish = gates && gates.bearish[i];
 
-// Calcula la EMA dinámica y la "velocidad de tendencia" (trend speed) para
-// toda la serie, vela a vela, exactamente como el indicador original:
-//  1) Una EMA cuyo factor de suavizado (alpha) se acelera cuando el precio
-//     se mueve rápido (usa el rango de los últimos 200 cierres como escala).
-//  2) Un acumulador ("speed") que suma cada vela la diferencia entre
-//     RMA(close,10) y RMA(open,10), y que se reinicia cada vez que el
-//     precio cruza la EMA dinámica (cambio de tendencia).
-//  3) La serie final que se pinta es un Hull MA (longitud 5) de ese
-//     acumulador — eso es lo que usamos como señal: positivo = Alcista,
-//     negativo = Bajista.
-function computeTrendSpeed(closes, opens, opts){
-  opts = opts || {};
-  const maxLength = opts.maxLength || 50;
-  const accelMultiplier = opts.accelMultiplier != null ? opts.accelMultiplier : 5.0;
-  const n = closes.length;
-
-  const absClose = closes.map(v=>Math.abs(v));
-  const maxAbsClose200 = highestPeriod(absClose, 200);
-
-  const deltaClose = new Array(n).fill(0);
-  for(let i=0;i<n;i++){
-    const prevClose = i>0 ? closes[i-1] : 0; // nz(counts_diff[1]) trata el primer valor como 0
-    deltaClose[i] = Math.abs(closes[i] - prevClose);
-  }
-  const maxDelta200 = highestPeriod(deltaClose, 200);
-
-  const c = rma(closes, 10);
-  const o = rma(opens, 10);
-
-  const dynEma = new Array(n).fill(NaN);
-  const speedArr = new Array(n).fill(0);
-
-  let speed = 0.0;
-  let x1 = 0;
-
-  for(let i=0;i<n;i++){
-    // --- EMA dinámica ---
-    const maxAbs = (maxAbsClose200[i] && maxAbsClose200[i] !== 0) ? maxAbsClose200[i] : 1;
-    const countsDiffNorm = (closes[i] + maxAbs) / (2*maxAbs);
-    const dynLength = 5 + countsDiffNorm * (maxLength - 5);
-
-    const maxDeltaSafe = (maxDelta200[i] && maxDelta200[i] !== 0) ? maxDelta200[i] : 1;
-    const accelFactor = deltaClose[i] / maxDeltaSafe;
-
-    const alphaBase = 2 / (dynLength + 1);
-    let alpha = alphaBase * (1 + accelFactor*accelMultiplier);
-    if(alpha > 1) alpha = 1;
-    if(alpha < 0) alpha = 0; // guarda defensiva, no debería darse con datos reales
-
-    if(i === 0 || isNaN(dynEma[i-1])){
-      dynEma[i] = closes[i];
-    } else {
-      dynEma[i] = alpha*closes[i] + (1-alpha)*dynEma[i-1];
-    }
-
-    // --- Cruce y acumulador de velocidad ---
-    const cVal = isNaN(c[i]) ? 0 : c[i];
-    const oVal = isNaN(o[i]) ? 0 : o[i];
-
-    if(i > 0){
-      const crossUp = closes[i] > dynEma[i] && closes[i-1] <= dynEma[i-1];
-      const crossDown = closes[i] < dynEma[i] && closes[i-1] >= dynEma[i-1];
-      if(crossUp){ x1 = i; speed = cVal - oVal; }
-      if(crossDown){ x1 = i; speed = cVal - oVal; }
-    }
-    speed = speed + (cVal - oVal);
-    speedArr[i] = speed;
+  let comprarOk=false, venderOk=false;
+  if(variant==='adx_estricto'){
+    comprarOk = aoAlcista && adxSubiendo && koBull;
+    venderOk  = aoBajista && adxSubiendo && koBear;
+  } else if(variant==='sin_adx'){
+    comprarOk = aoAlcista && koBull;
+    venderOk  = aoBajista && koBear;
+  } else if(variant==='adx_no_bajando'){
+    comprarOk = aoAlcista && adxNoBajando && koBull;
+    venderOk  = aoBajista && adxNoBajando && koBear;
+  } else if(variant==='ml_rsi'){
+    comprarOk = aoAlcista && mlAlcista && koBull;
+    venderOk  = aoBajista && mlBajista && koBear;
+  } else if(variant==='confluencia_htf'){
+    // Igual que 'adx_estricto' en 1H, pero exige ADEMÁS que 4H o Diario
+    // (con que uno de los dos, vale) confirmen la misma tendencia.
+    comprarOk = aoAlcista && adxSubiendo && koBull && gateBullish;
+    venderOk  = aoBajista && adxSubiendo && koBear && gateBearish;
+  } else if(variant==='confluencia_htf_and'){
+    // Versión más estricta: exige que 4H Y Diario confirmen los DOS a la vez.
+    const gateBullishAnd = gates && gates.bull4[i] && gates.bullD[i];
+    const gateBearishAnd = gates && gates.bear4[i] && gates.bearD[i];
+    comprarOk = aoAlcista && adxSubiendo && koBull && gateBullishAnd;
+    venderOk  = aoBajista && adxSubiendo && koBear && gateBearishAnd;
+  } else if(variant==='cascada_diario_4h_1h'){
+    // Diario marca la dirección permitida (tendencia principal, AO+Koncorde).
+    // 4H tiene que dar su PROPIA señal completa (AO+ADX+Koncorde) — es el
+    // que genera la entrada. 1H tiene que dar TAMBIÉN su propia señal
+    // completa — al esperar a que el 1H se alinee, la entrada llega más
+    // tarde que el simple disparo del 4H, lo cual de forma natural suele
+    // capturar un precio algo mejor (más ajustado) que entrar de inmediato.
+    const dailyBullish = gates && gates.bullD[i];
+    const dailyBearish = gates && gates.bearD[i];
+    const cuatroHBullish = gates && gates.bull4Full[i];
+    const cuatroHBearish = gates && gates.bear4Full[i];
+    comprarOk = dailyBullish && cuatroHBullish && aoAlcista && adxSubiendo && koBull;
+    venderOk  = dailyBearish && cuatroHBearish && aoBajista && adxSubiendo && koBear;
+  } else if(variant==='pullback_4h_1h'){
+    // Diario marca la tendencia principal. El 4H tiene que estar EN CONTRA
+    // de esa tendencia (un retroceso/pullback dentro del movimiento mayor).
+    // El 1H tiene que dar su señal completa a favor del Diario otra vez
+    // (el "impulso contrario" al retroceso del 4H) — ese giro del 1H suele
+    // marcar el momento en que el retroceso del 4H se agota y el precio
+    // retoma la tendencia principal.
+    const dailyBullish = gates && gates.bullD[i];
+    const dailyBearish = gates && gates.bearD[i];
+    const cuatroHEnRetrocesoBajista = gates && gates.bear4[i]; // 4H bajista dentro de tendencia diaria alcista
+    const cuatroHEnRetrocesoAlcista = gates && gates.bull4[i]; // 4H alcista dentro de tendencia diaria bajista
+    comprarOk = dailyBullish && cuatroHEnRetrocesoBajista && aoAlcista && adxSubiendo && koBull;
+    venderOk  = dailyBearish && cuatroHEnRetrocesoAlcista && aoBajista && adxSubiendo && koBear;
   }
 
-  const trendspeed = hma(speedArr, 5);
-  const signal = trendspeed.map(v=>{
-    if(isNaN(v)) return 'Sin datos';
-    if(v > 0) return 'Alcista';
-    if(v < 0) return 'Bajista';
-    return 'Neutral';
-  });
-
-  return { dynEma, speed:speedArr, trendspeed, signal };
+  let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
+  // Cierre forzado por Koncorde (idéntico al bot en vivo): manda por
+  // encima de cualquier condición de la variante.
+  if(!isNaN(s.konVal[i]) && !isNaN(s.maTrend[i]) && s.konVal[i] < s.maTrend[i]){
+    verdict = 'VENDER';
+  }
+  return verdict;
 }
 
-const BITGET_TAKER_FEE_PCT = 0.06;
-const BITGET_FUNDING_PCT_PER_8H = 0.01;
-
-// Simulador LARGO-SOLO: entra cuando el cierre pasa por ENCIMA de la EMA
-// dinámica (cruce) Y ADEMÁS AO está "Alcista" Y ADX está subiendo. Sale
-// cuando una vela CIERRA por debajo de la línea (sin cambios respecto a
-// la versión anterior — el filtro extra solo endurece la ENTRADA).
-// Si no se pasan aoState/adxSubiendo, se comporta igual que antes (solo cruce).
-function simulateTrendSpeedLongOnly(closes, times, dynEma, leverage, marginFraction, horasPorVela, aoState, adxSubiendo){
-  const n = closes.length;
+// Simula una cuenta que sigue los veredictos: entra largo en COMPRAR,
+// corto en VENDER, y se queda plana en ESPERAR. Aplica SL y TP fijos
+// (% sobre el precio de entrada) comprobados intra-vela con high/low,
+// y apalancamiento sobre el resultado. Si en la misma vela se tocan
+// SL y TP a la vez, se prioriza el SL (asunción conservadora).
+function simulateTrades(s, verdicts, slPct, tpPct, leverage){
+  const n = s.n;
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
-  let inPosition = false, entryPrice = null, entryIdx = null;
+  let position = null; // 'long' | 'short' | null
+  let entryPrice = null, slPrice = null, tpPrice = null;
+  const trades = [];
+
+  const closeTrade = (exitPrice, reason) => {
+    const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
+    const leveraged = rawReturn * leverage;
+    equity *= Math.max(0, 1 + leveraged); // nunca negativo (liquidación total como suelo)
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
+    trades.push({ direction:position, entryPrice, exitPrice, returnPct:leveraged*100, reason });
+    position = null; entryPrice = null; slPrice = null; tpPrice = null;
+  };
+
+  for(let i=1;i<n;i++){
+    if(position){
+      const hitSL = position==='long' ? s.lows[i] <= slPrice : s.highs[i] >= slPrice;
+      const hitTP = position==='long' ? s.highs[i] >= tpPrice : s.lows[i] <= tpPrice;
+      if(hitSL){ closeTrade(slPrice, 'SL'); }
+      else if(hitTP){ closeTrade(tpPrice, 'TP'); }
+      else {
+        const v = verdicts[i];
+        const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+        if(!stillValid) closeTrade(s.closes[i], 'Cambio de veredicto');
+      }
+    }
+    if(!position){
+      const v = verdicts[i];
+      if(v==='COMPRAR'){
+        position='long'; entryPrice=s.closes[i];
+        slPrice = entryPrice*(1-slPct/100); tpPrice = entryPrice*(1+tpPct/100);
+      } else if(v==='VENDER'){
+        position='short'; entryPrice=s.closes[i];
+        slPrice = entryPrice*(1+slPct/100); tpPrice = entryPrice*(1-tpPct/100);
+      }
+    }
+  }
+  // Si queda una operación abierta al final, se cierra al último precio
+  // (solo para que las métricas cuadren; no afecta a las demás).
+  if(position) closeTrade(s.closes[n-1], 'Fin del periodo');
+
+  const wins = trades.filter(t=>t.returnPct>0).length;
+  const grossGain = trades.filter(t=>t.returnPct>0).reduce((a,t)=>a+t.returnPct,0);
+  const grossLoss = Math.abs(trades.filter(t=>t.returnPct<=0).reduce((a,t)=>a+t.returnPct,0));
+  return {
+    trades: trades.length,
+    winRatePct: trades.length ? (wins/trades.length*100) : 0,
+    totalReturnPct: (equity-1)*100,
+    maxDrawdownPct: maxDrawdown*100,
+    avgReturnPerTradePct: trades.length ? (trades.reduce((a,t)=>a+t.returnPct,0)/trades.length) : 0,
+    profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0)
+  };
+}
+
+// Igual que simulateTrades, pero en vez de usar SIEMPRE el 100% de la cuenta
+// como margen, solo arriesga un % FIJO del capital total en cada operación
+// (position sizing). El apalancamiento (leverage) se mantiene igual —
+// se aplica dentro de la porción de capital arriesgada, no se toca — pero
+// como esa porción es mucho más pequeña que el 100%, una racha de pérdidas
+// consecutivas erosiona la cuenta mucho más despacio.
+//   marginFraction = riskPct / (slPct * leverage)   (nunca más del 100%)
+function simulateTradesRiskSized(s, verdicts, slPct, tpPct, leverage, riskPct){
+  const n = s.n;
+  let equity = 1.0, peak = 1.0, maxDrawdown = 0;
+  let position = null;
+  let entryPrice = null, slPrice = null, tpPrice = null;
+  const trades = [];
+
+  // Fracción del capital total que se arriesga en cada operación, calculada
+  // para que, si salta el SL, la pérdida sea exactamente 'riskPct' de la cuenta.
+  const marginFraction = Math.min(1, (riskPct/100) / ((slPct/100) * leverage));
+
+  const closeTrade = (exitPrice, reason) => {
+    const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
+    const leveraged = rawReturn * leverage;
+    // Solo la porción 'marginFraction' de la cuenta participa en este resultado;
+    // el resto del capital se queda intacto, sin exponerse a esta operación.
+    const equityChange = marginFraction * leveraged;
+    equity *= Math.max(0, 1 + equityChange);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
+    trades.push({ direction:position, entryPrice, exitPrice, returnPct:leveraged*100, equityChangePct:equityChange*100, reason });
+    position = null; entryPrice = null; slPrice = null; tpPrice = null;
+  };
+
+  for(let i=1;i<n;i++){
+    if(position){
+      const hitSL = position==='long' ? s.lows[i] <= slPrice : s.highs[i] >= slPrice;
+      const hitTP = position==='long' ? s.highs[i] >= tpPrice : s.lows[i] <= tpPrice;
+      if(hitSL){ closeTrade(slPrice, 'SL'); }
+      else if(hitTP){ closeTrade(tpPrice, 'TP'); }
+      else {
+        const v = verdicts[i];
+        const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+        if(!stillValid) closeTrade(s.closes[i], 'Cambio de veredicto');
+      }
+    }
+    if(!position){
+      const v = verdicts[i];
+      if(v==='COMPRAR'){
+        position='long'; entryPrice=s.closes[i];
+        slPrice = entryPrice*(1-slPct/100); tpPrice = entryPrice*(1+tpPct/100);
+      } else if(v==='VENDER'){
+        position='short'; entryPrice=s.closes[i];
+        slPrice = entryPrice*(1+slPct/100); tpPrice = entryPrice*(1-tpPct/100);
+      }
+    }
+  }
+  if(position) closeTrade(s.closes[n-1], 'Fin del periodo');
+
+  const wins = trades.filter(t=>t.equityChangePct>0).length;
+  const grossGain = trades.filter(t=>t.equityChangePct>0).reduce((a,t)=>a+t.equityChangePct,0);
+  const grossLoss = Math.abs(trades.filter(t=>t.equityChangePct<=0).reduce((a,t)=>a+t.equityChangePct,0));
+  return {
+    trades: trades.length,
+    winRatePct: trades.length ? (wins/trades.length*100) : 0,
+    totalReturnPct: (equity-1)*100,
+    maxDrawdownPct: maxDrawdown*100,
+    avgReturnPerTradePct: trades.length ? (trades.reduce((a,t)=>a+t.equityChangePct,0)/trades.length) : 0,
+    profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0),
+    marginFractionPct: marginFraction*100
+  };
+}
+
+// Igual que simulateTradesRiskSized, pero SIN ningún stop loss: la operación
+// solo se cierra por Take Profit o por cambio de veredicto (nunca se corta
+// antes por precio). Al no existir una distancia de SL, no se puede calcular
+// el tamaño de posición a partir de un "% de riesgo" — aquí se especifica
+// directamente qué fracción fija del capital se usa en cada operación
+// (marginFraction), para poder comparar en igualdad de condiciones contra
+// las mismas fracciones que salieron en el Análisis E.
+function simulateTradesNoSL(s, verdicts, tpPct, leverage, marginFraction){
+  const n = s.n;
+  let equity = 1.0, peak = 1.0, maxDrawdown = 0;
+  let position = null, entryPrice = null, tpPrice = null, entryIdx = null;
+  const trades = [];
+  let peorOperacionPct = 0; // la operación individual más negativa, para vigilar el riesgo de cola
+
+  const closeTrade = (exitPrice) => {
+    const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
+    const leveraged = rawReturn * leverage;
+    const equityChange = marginFraction * leveraged;
+    equity *= Math.max(0, 1 + equityChange);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
+    if(equityChange*100 < peorOperacionPct) peorOperacionPct = equityChange*100;
+    trades.push({ direction:position, equityChangePct:equityChange*100, entryIdx });
+    position = null; entryPrice = null; tpPrice = null; entryIdx = null;
+  };
+
+  for(let i=1;i<n;i++){
+    if(position){
+      const hitTP = position==='long' ? s.highs[i] >= tpPrice : s.lows[i] <= tpPrice;
+      if(hitTP){ closeTrade(tpPrice); }
+      else {
+        const v = verdicts[i];
+        const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+        if(!stillValid) closeTrade(s.closes[i]);
+      }
+    }
+    if(!position){
+      const v = verdicts[i];
+      if(v==='COMPRAR'){ position='long'; entryPrice=s.closes[i]; tpPrice = entryPrice*(1+tpPct/100); entryIdx=i; }
+      else if(v==='VENDER'){ position='short'; entryPrice=s.closes[i]; tpPrice = entryPrice*(1-tpPct/100); entryIdx=i; }
+    }
+  }
+  if(position) closeTrade(s.closes[n-1]);
+
+  const wins = trades.filter(t=>t.equityChangePct>0).length;
+  const grossGain = trades.filter(t=>t.equityChangePct>0).reduce((a,t)=>a+t.equityChangePct,0);
+  const grossLoss = Math.abs(trades.filter(t=>t.equityChangePct<=0).reduce((a,t)=>a+t.equityChangePct,0));
+  return {
+    trades: trades.length,
+    winRatePct: trades.length ? (wins/trades.length*100) : 0,
+    totalReturnPct: (equity-1)*100,
+    maxDrawdownPct: maxDrawdown*100,
+    profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0),
+    peorOperacionPct,
+    tradeLog: trades
+  };
+}
+
+// Igual que simulateTradesNoSL, pero descontando comisiones y funding reales
+// de Bitget (USDT-M perpetual, nivel estándar, margen aislado — el modo de
+// margen no cambia estos costes):
+//   - Entrada y cierre por cambio de veredicto: se asumen a mercado → taker (0.06%)
+//   - Cierre por Take Profit: se asume con orden límite ya puesta → maker (0.02%)
+//   - Funding: cada 8h que la posición sigue abierta, se descuenta un coste
+//     estimado (0.01% del NOCIONAL — precio×apalancamiento — por periodo).
+//     El funding real fluctúa entre -0.05% y +0.05% y puede ir a tu favor;
+//     0.01% es una estimación conservadora de la magnitud típica, no un
+//     valor exacto — el funding real depende del sentimiento del mercado.
+const BITGET_TAKER_FEE_PCT = 0.06;
+const BITGET_MAKER_FEE_PCT = 0.02;
+const BITGET_FUNDING_PCT_PER_8H = 0.01;
+const HORAS_POR_VELA_1H = 1;
+
+function simulateTradesNoSLConFees(s, verdicts, tpPct, leverage, marginFraction, horasPorVela, slPct){
+  if(horasPorVela==null) horasPorVela = 1; // por defecto, velas de 1H (comportamiento anterior)
+  // slPct es OPCIONAL — si no se pasa (undefined/null), no hay stop loss,
+  // exactamente el comportamiento de siempre. Si se pasa, actúa como
+  // cortafuegos: un stop ANCHO pensado solo para cortar movimientos
+  // extremos (tipo 2021), no para gestionar el riesgo normal día a día.
+  const n = s.n;
+  let equity = 1.0, peak = 1.0, maxDrawdown = 0;
+  let position = null, entryPrice = null, tpPrice = null, slPrice = null, entryIdx = null;
+  const trades = [];
+  let peorOperacionPct = 0;
+  let totalComisionesPct = 0, totalFundingPct = 0;
+  let cierresPorSL = 0;
+
+  // El nocional (tamaño real de la posición en el exchange) es la porción
+  // de capital arriesgada multiplicada por el apalancamiento — las
+  // comisiones y el funding se cobran sobre ESE valor, no sobre el capital.
+  const nocionalFraction = marginFraction * leverage;
+
+  const closeTrade = (exitPrice, feePct, entryIdxLocal, exitIdxLocal) => {
+    const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
+    const leveraged = rawReturn * leverage;
+
+    // Comisión de entrada (taker, ya se pagó al abrir) + comisión de salida
+    const comisionSalidaPct = nocionalFraction * (feePct/100) * 100; // en % de la cuenta
+    const comisionTotalPct = comisionSalidaPct; // la de entrada ya se descontó al abrir (ver más abajo)
+
+    // Funding: nº de periodos de 8h completos que estuvo abierta la posición
+    const horasAbierta = (exitIdxLocal - entryIdxLocal) * horasPorVela;
+    const periodosFunding = Math.floor(horasAbierta / 8);
+    const fundingPct = nocionalFraction * (BITGET_FUNDING_PCT_PER_8H/100) * periodosFunding * 100;
+
+    const equityChange = marginFraction * leveraged - comisionTotalPct/100 - fundingPct/100;
+    equity *= Math.max(0, 1 + equityChange);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
+    if(equityChange*100 < peorOperacionPct) peorOperacionPct = equityChange*100;
+    totalComisionesPct += comisionTotalPct;
+    totalFundingPct += fundingPct;
+    trades.push({ direction:position, equityChangePct:equityChange*100, entryIdx });
+    position = null; entryPrice = null; tpPrice = null; slPrice = null; entryIdx = null;
+  };
+
+  for(let i=1;i<n;i++){
+    if(position){
+      const hitSL = slPct!=null && (position==='long' ? s.lows[i] <= slPrice : s.highs[i] >= slPrice);
+      const hitTP = position==='long' ? s.highs[i] >= tpPrice : s.lows[i] <= tpPrice;
+      if(hitSL){ cierresPorSL++; closeTrade(slPrice, BITGET_TAKER_FEE_PCT, entryIdx, i); }
+      else if(hitTP){ closeTrade(tpPrice, BITGET_MAKER_FEE_PCT, entryIdx, i); }
+      else {
+        const v = verdicts[i];
+        const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+        if(!stillValid) closeTrade(s.closes[i], BITGET_TAKER_FEE_PCT, entryIdx, i);
+      }
+    }
+    if(!position){
+      const v = verdicts[i];
+      if(v==='COMPRAR' || v==='VENDER'){
+        position = v==='COMPRAR' ? 'long' : 'short';
+        entryPrice = s.closes[i];
+        tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
+        slPrice = slPct!=null ? (position==='long' ? entryPrice*(1-slPct/100) : entryPrice*(1+slPct/100)) : null;
+        entryIdx = i;
+        // Comisión de entrada (taker), se descuenta ya mismo de la cuenta.
+        const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
+        equity *= Math.max(0, 1 - comisionEntradaPct/100);
+        totalComisionesPct += comisionEntradaPct;
+      }
+    }
+  }
+  if(position) closeTrade(s.closes[n-1], BITGET_TAKER_FEE_PCT, entryIdx, n-1);
+
+  const wins = trades.filter(t=>t.equityChangePct>0).length;
+  const grossGain = trades.filter(t=>t.equityChangePct>0).reduce((a,t)=>a+t.equityChangePct,0);
+  const grossLoss = Math.abs(trades.filter(t=>t.equityChangePct<=0).reduce((a,t)=>a+t.equityChangePct,0));
+  return {
+    trades: trades.length,
+    cierresPorSL,
+    winRatePct: trades.length ? (wins/trades.length*100) : 0,
+    totalReturnPct: (equity-1)*100,
+    maxDrawdownPct: maxDrawdown*100,
+    profitFactor: grossLoss>0 ? (grossGain/grossLoss) : (grossGain>0 ? Infinity : 0),
+    peorOperacionPct,
+    totalComisionesPct,
+    totalFundingPct,
+    tradeLog: trades
+  };
+}
+
+// Simulador de la Confluencia en 4H con una SALIDA DISTINTA: en vez de
+// cerrar en cuanto cualquiera de las condiciones de entrada deja de
+// cumplirse, aguanta mientras solo falle una — y cierra solo cuando el AO
+// muestra "Retroceso" del movimiento principal Y el ADX cambia de dirección
+// (deja de subir) A LA VEZ, en la misma vela. El TP y el cierre forzado por
+// Koncorde se mantienen exactamente igual que en la versión validada.
+function simulateConfluenciaSalidaAoAdx(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela){
+  const idxD = alignDailyIndex(seriesD, series4H.times);
+  const n = series4H.n;
+  let equity = 1.0, peak = 1.0, maxDrawdown = 0;
+  let position = null, entryPrice = null, tpPrice = null, entryIdx = null;
   const trades = [];
   const nocionalFraction = marginFraction * leverage;
 
-  const closeTrade = (exitPrice, exitIdx) => {
-    const rawReturn = (exitPrice/entryPrice - 1);
+  const closeTrade = (exitPrice, feePct, i) => {
+    const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
     const leveraged = rawReturn * leverage;
-    const comisionSalidaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
-    const horasAbierta = (exitIdx - entryIdx) * horasPorVela;
+    const comisionSalidaPct = nocionalFraction * (feePct/100) * 100;
+    const horasAbierta = (i - entryIdx) * horasPorVela;
     const periodosFunding = Math.floor(horasAbierta / 8);
     const fundingPct = nocionalFraction * (BITGET_FUNDING_PCT_PER_8H/100) * periodosFunding * 100;
     const equityChange = marginFraction * leveraged - comisionSalidaPct/100 - fundingPct/100;
@@ -328,25 +910,36 @@ function simulateTrendSpeedLongOnly(closes, times, dynEma, leverage, marginFract
     peak = Math.max(peak, equity);
     maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
     trades.push({ equityChangePct: equityChange*100, entryIdx });
-    inPosition = false; entryPrice = null; entryIdx = null;
+    position = null; entryPrice = null; tpPrice = null; entryIdx = null;
   };
 
   for(let i=1;i<n;i++){
-    if(isNaN(dynEma[i]) || isNaN(dynEma[i-1])) continue; // aún calentando (ventana de 200 velas)
-    if(inPosition){
-      if(closes[i] < dynEma[i]) closeTrade(closes[i], i);
+    const iD = idxD[i];
+    if(position){
+      const hitTP = position==='long' ? series4H.highs[i] >= tpPrice : series4H.lows[i] <= tpPrice;
+      const forzadoKoncorde = !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
+      const retrocesoAoAdx = position==='long'
+        ? (series4H.aoState[i]==='Retroceso alcista' && !series4H.adxSubiendo[i])
+        : (series4H.aoState[i]==='Retroceso bajista' && !series4H.adxSubiendo[i]);
+      if(hitTP){ closeTrade(tpPrice, BITGET_MAKER_FEE_PCT, i); }
+      else if(position==='long' && forzadoKoncorde){ closeTrade(series4H.closes[i], BITGET_TAKER_FEE_PCT, i); }
+      else if(retrocesoAoAdx){ closeTrade(series4H.closes[i], BITGET_TAKER_FEE_PCT, i); }
     }
-    if(!inPosition){
-      const cruceAlcista = closes[i] > dynEma[i] && closes[i-1] <= dynEma[i-1];
-      const filtroOk = !aoState || (aoState[i]==='Alcista' && adxSubiendo[i]);
-      if(cruceAlcista && filtroOk){
-        inPosition = true; entryPrice = closes[i]; entryIdx = i;
-        const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
-        equity *= Math.max(0, 1 - comisionEntradaPct/100);
-      }
+    if(!position){
+      const aoAlcista = series4H.aoState[i]==='Alcista', aoBajista = series4H.aoState[i]==='Bajista';
+      const dailyBullish = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+      const dailyBearish = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+      let comprarOk = aoAlcista && series4H.adxSubiendo[i] && series4H.koBull[i] && dailyBullish;
+      let venderOk  = aoBajista && series4H.adxSubiendo[i] && series4H.koBear[i] && dailyBearish;
+      // El cierre forzado por Koncorde también puede abrir un corto nuevo, igual que en la versión validada.
+      const forzadoAbreCorto = !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
+      if(comprarOk){ position='long'; entryPrice=series4H.closes[i]; tpPrice=entryPrice*(1+tpPct/100); entryIdx=i;
+        const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100; equity *= Math.max(0, 1 - comisionEntradaPct/100); }
+      else if(venderOk || forzadoAbreCorto){ position='short'; entryPrice=series4H.closes[i]; tpPrice=entryPrice*(1-tpPct/100); entryIdx=i;
+        const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100; equity *= Math.max(0, 1 - comisionEntradaPct/100); }
     }
   }
-  if(inPosition) closeTrade(closes[n-1], n-1);
+  if(position) closeTrade(series4H.closes[n-1], BITGET_TAKER_FEE_PCT, n-1);
 
   const wins = trades.filter(t=>t.equityChangePct>0).length;
   const grossGain = trades.filter(t=>t.equityChangePct>0).reduce((a,t)=>a+t.equityChangePct,0);
@@ -361,6 +954,10 @@ function simulateTrendSpeedLongOnly(closes, times, dynEma, leverage, marginFract
   };
 }
 
+// Recalcula las métricas para un SUBCONJUNTO de operaciones, componiendo el
+// capital desde cero (equity=1.0) solo con esas operaciones — así el tramo
+// reservado se evalúa como si fuera un periodo independiente, con su propio
+// drawdown, y no arrastra el resultado acumulado del resto del histórico.
 function metricsForTradeSubset(tradeLog){
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
   tradeLog.forEach(t=>{
@@ -380,74 +977,546 @@ function metricsForTradeSubset(tradeLog){
   };
 }
 
-function pad(str,len){ str=String(str); return str.length>=len?str:str+' '.repeat(len-str.length); }
-function padL(str,len){ str=String(str); return str.length>=len?str:' '.repeat(len-str.length)+str; }
-function fmtPct(n){ return (n>=0?'+':'')+n.toFixed(2)+'%'; }
+function pad(str, len){ str=String(str); return str.length>=len ? str : str + ' '.repeat(len-str.length); }
 
-async function analizarTemporalidad(interval, label, horasPorVela){
-  console.log('\n\n========================================');
-  console.log('TEMPORALIDAD: ' + label);
-  console.log('========================================');
-
-  const ohlcv = await fetchCandlesForMonths(interval, MESES_HISTORICO, 300);
-  console.log('Velas descargadas: ' + ohlcv.closes.length + ' (desde ' + new Date(ohlcv.times[0]).toISOString() + ' hasta ' + new Date(ohlcv.times[ohlcv.times.length-1]).toISOString() + ')');
-
-  const ts = computeTrendSpeed(ohlcv.closes, ohlcv.opens);
-  const dynEma = ts.dynEma;
-  const { aoState, adxSubiendo } = computeAoAdxState(ohlcv.highs, ohlcv.lows, ohlcv.closes);
-
-  console.log('\n--- Solo cruce vs cruce+AO+ADX (12% de capital) ---');
-  console.log(pad('Variante',16) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
-  const rSoloCruce = simulateTrendSpeedLongOnly(ohlcv.closes, ohlcv.times, dynEma, LEVERAGE, 0.12, horasPorVela);
-  const rConFiltro = simulateTrendSpeedLongOnly(ohlcv.closes, ohlcv.times, dynEma, LEVERAGE, 0.12, horasPorVela, aoState, adxSubiendo);
-  console.log(pad('Solo cruce',16) + padL(rSoloCruce.trades,9) + padL(rSoloCruce.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSoloCruce.totalReturnPct),12) + padL('-'+rSoloCruce.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSoloCruce.profitFactor.toFixed(2),10));
-  console.log(pad('+ AO + ADX',16) + padL(rConFiltro.trades,9) + padL(rConFiltro.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rConFiltro.totalReturnPct),12) + padL('-'+rConFiltro.maxDrawdownPct.toFixed(1)+'%',11) + padL(rConFiltro.profitFactor.toFixed(2),10));
-
-  console.log('\n--- Barrido de capital usado, CON el filtro AO+ADX ---');
-  console.log(pad('% capital usado',18) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
-  [2,4,8,12,20].forEach(marginPct=>{
-    const r = simulateTrendSpeedLongOnly(ohlcv.closes, ohlcv.times, dynEma, LEVERAGE, marginPct/100, horasPorVela, aoState, adxSubiendo);
-    console.log(pad(marginPct+'%',18) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
-  });
-
-  console.log('\n--- Walk-forward año por año, CON el filtro AO+ADX (12% de capital) ---');
-  const rWF = rConFiltro;
-  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
-  const buckets = {};
-  rWF.tradeLog.forEach(t=>{
-    const year = new Date(ohlcv.times[t.entryIdx]).getUTCFullYear();
-    if(!buckets[year]) buckets[year] = [];
-    buckets[year].push(t);
-  });
-  let aniosPositivos = 0, aniosTotal = 0;
-  Object.keys(buckets).map(Number).sort((a,b)=>a-b).forEach(year=>{
-    const m = metricsForTradeSubset(buckets[year]);
-    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
-    aniosTotal++;
-    if(m.totalReturnPct>0) aniosPositivos++;
-  });
-  console.log('Años con retorno positivo: ' + aniosPositivos + ' de ' + aniosTotal);
-
-  // Validación fuera de muestra: últimos MESES_RESERVADOS meses, aislados
-  const cutoffReservado = ohlcv.times[ohlcv.times.length-1] - MESES_RESERVADOS*30*86400000;
-  const tradesAntes = rWF.tradeLog.filter(t => ohlcv.times[t.entryIdx] < cutoffReservado);
-  const tradesReservado = rWF.tradeLog.filter(t => ohlcv.times[t.entryIdx] >= cutoffReservado);
-  const mAntes = metricsForTradeSubset(tradesAntes);
-  const mReservado = metricsForTradeSubset(tradesReservado);
-  console.log('\n--- Fuera de muestra, CON el filtro AO+ADX: últimos ' + MESES_RESERVADOS + ' meses reservados (12% capital) ---');
-  console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('P.Factor',10));
-  console.log(pad('Resto del histórico',20) + padL(mAntes.trades,9) + padL(mAntes.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntes.totalReturnPct),12) + padL(mAntes.profitFactor.toFixed(2),10));
-  console.log(pad('TRAMO RESERVADO',20) + padL(mReservado.trades,9) + padL(mReservado.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservado.totalReturnPct),12) + padL(mReservado.profitFactor.toFixed(2),10));
-}
+function padL(str, len){ str=String(str); return str.length>=len ? str : ' '.repeat(len-str.length) + str; }
+function fmtPct(n){ return (n>=0?'+':'') + n.toFixed(2) + '%'; }
 
 async function main(){
-  console.log('=== Bitman Backtest — Trend Speed Analyzer en solitario (solo largos) ===');
-  console.log('Símbolo: ' + SYMBOL + ' · Periodo: últimos ' + MESES_HISTORICO + ' meses · Apalancamiento: ' + LEVERAGE + 'x');
-  console.log('Sin Take Profit ni Stop Loss — solo entra/sale con el cruce de la EMA dinámica.');
+  console.log('=== Bitman Backtest ===');
+  console.log('Símbolo: ' + SYMBOL + ' · Temporalidad: 1H · Periodo: últimos ' + MESES_HISTORICO + ' meses · Apalancamiento: ' + LEVERAGE + 'x');
+  console.log('Descargando velas 1H...');
+  const ohlcv = await fetchCandlesForMonths('1h', MESES_HISTORICO);
+  console.log('Velas 1H descargadas: ' + ohlcv.closes.length + ' (desde ' + new Date(ohlcv.times[0]).toISOString() + ' hasta ' + new Date(ohlcv.times[ohlcv.times.length-1]).toISOString() + ')');
 
-  await analizarTemporalidad('1h', '1 HORA', 1);
-  await analizarTemporalidad('4h', '4 HORAS', 4);
-  await analizarTemporalidad('1d', 'DIARIO', 24);
+  console.log('Descargando velas 4H y Diario (para la puerta de confluencia)...');
+  const ohlcv4H = await fetchCandlesForMonths('4h', MESES_HISTORICO, 300);
+  const ohlcvD  = await fetchCandlesForMonths('1d', MESES_HISTORICO, 300);
+  console.log('Velas 4H: ' + ohlcv4H.closes.length + ' · Velas Diario: ' + ohlcvD.closes.length);
+
+  const s = computeFullSeries(ohlcv);
+  const s4H = computeFullSeries(ohlcv4H);
+  const sD = computeFullSeries(ohlcvD);
+  const gates = buildConfluenceGates(s, s4H, sD);
+
+  // Recortamos el análisis a los últimos MESES_HISTORICO meses reales
+  // (las velas de más son solo warmup para que los indicadores y el
+  // ML RSI tengan ya su ventana completa desde el primer día contado).
+  const cutoffTime = ohlcv.times[ohlcv.times.length-1] - MESES_HISTORICO*30*86400000;
+  let startIdx = 0;
+  while(startIdx < s.n && ohlcv.times[startIdx] < cutoffTime) startIdx++;
+  console.log('Vela de inicio del análisis: ' + new Date(ohlcv.times[startIdx]).toISOString() + ' (índice ' + startIdx + ' de ' + s.n + ')');
+
+  console.log('\nCalculando ML RSI para todo el histórico (puede tardar 1-2 minutos)...');
+  const t0 = Date.now();
+  const mlSignal = computeMLRSISeries(ohlcv.closes);
+  console.log('ML RSI calculado en ' + ((Date.now()-t0)/1000).toFixed(1) + 's');
+
+  // Recortamos los veredictos al rango [startIdx, n) para cada variante,
+  // pero el simulador de operaciones necesita la serie completa desde 0
+  // para no arrancar "a medias" de un cálculo con menos historial —
+  // así que simulamos sobre toda la serie y luego solo el rango de
+  // fechas de las operaciones importa para las métricas (aceptamos que
+  // 1-2 operaciones puedan haber empezado justo antes del corte).
+
+  // ---------- ANÁLISIS A: variantes de ADX ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS A — Formas de exigir el ADX (SL fijo ' + SL_DEFAULT_PCT + '% / TP fijo ' + TP_DEFAULT_PCT + '%, ' + LEVERAGE + 'x)');
+  console.log('========================================');
+
+  const variantes = [
+    {key:'adx_estricto',           label:'ADX estricto (actual)'},
+    {key:'sin_adx',                label:'Sin ADX (solo AO+Koncorde)'},
+    {key:'adx_no_bajando',         label:'ADX no cayendo'},
+    {key:'ml_rsi',                 label:'ML RSI en vez de ADX'},
+    {key:'confluencia_htf',        label:'Confluencia 1H+(4H o Diario)'},
+    {key:'cascada_diario_4h_1h',   label:'Cascada Diario→4H→1H'},
+    {key:'pullback_4h_1h',         label:'Retroceso 4H + giro 1H'}
+  ];
+
+  const resultadosA = variantes.map(v=>{
+    const verdicts = new Array(s.n).fill('ESPERAR');
+    for(let i=1;i<s.n;i++) verdicts[i] = verdictAtVariant(s, i, v.key, mlSignal, gates);
+    const r = simulateTrades(s, verdicts, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE);
+    return {label:v.label, ...r};
+  });
+
+  console.log('\n' + pad('Variante',28) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/Op',10) + padL('P.Factor',10));
+  resultadosA.forEach(r=>{
+    console.log(pad(r.label,28) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(fmtPct(r.avgReturnPerTradePct),10) + padL(r.profitFactor.toFixed(2),10));
+  });
+
+  // ---------- ANÁLISIS B: barrido de SL/TP ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS B — Barrido de Stop Loss / Take Profit (lógica: Confluencia 1H+(4H o Diario), ' + LEVERAGE + 'x)');
+  console.log('========================================');
+
+  const verdictsActual = new Array(s.n).fill('ESPERAR');
+  for(let i=1;i<s.n;i++) verdictsActual[i] = verdictAtVariant(s, i, 'confluencia_htf', mlSignal, gates);
+
+  const slOptions = [3, 5, 7, 10];
+  const tpOptions = [10, 15, 20, 25, 30];
+  const resultadosB = [];
+  slOptions.forEach(sl=>{
+    tpOptions.forEach(tp=>{
+      const r = simulateTrades(s, verdictsActual, sl, tp, LEVERAGE);
+      resultadosB.push({sl, tp, ...r});
+    });
+  });
+
+  console.log('\n' + pad('SL',6) + pad('TP',6) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/Op',10) + padL('P.Factor',10) + padL('Ret/DD',9));
+  resultadosB.forEach(r=>{
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad('-'+r.sl+'%',6) + pad('+'+r.tp+'%',6) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(fmtPct(r.avgReturnPerTradePct),10) + padL(r.profitFactor.toFixed(2),10) + padL(retDD.toFixed(2),9));
+  });
+
+  // Mejor por retorno total y mejor por relación retorno/drawdown
+  const bestByReturn = resultadosB.slice().sort((a,b)=>b.totalReturnPct-a.totalReturnPct)[0];
+  const bestByRiskAdj = resultadosB.slice().sort((a,b)=>{
+    const ra = a.maxDrawdownPct>0 ? a.totalReturnPct/a.maxDrawdownPct : (a.totalReturnPct>0?Infinity:-Infinity);
+    const rb = b.maxDrawdownPct>0 ? b.totalReturnPct/b.maxDrawdownPct : (b.totalReturnPct>0?Infinity:-Infinity);
+    return rb-ra;
+  })[0];
+
+  console.log('\nMejor por retorno total: SL -' + bestByReturn.sl + '% / TP +' + bestByReturn.tp + '%  →  ' + fmtPct(bestByReturn.totalReturnPct) + ' (drawdown -' + bestByReturn.maxDrawdownPct.toFixed(1) + '%)');
+  console.log('Mejor relación retorno/drawdown (más "seguro"): SL -' + bestByRiskAdj.sl + '% / TP +' + bestByRiskAdj.tp + '%  →  ' + fmtPct(bestByRiskAdj.totalReturnPct) + ' (drawdown -' + bestByRiskAdj.maxDrawdownPct.toFixed(1) + '%)');
+
+  // ---------- ANÁLISIS C: tres formas de intentar reducir el drawdown ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS C — Reducir el drawdown (partiendo de Confluencia + SL -5% / TP +15%)');
+  console.log('========================================');
+
+  // C1: barrido de apalancamiento (con la mejor combinación ya encontrada)
+  console.log('\n--- C1: Apalancamiento (Confluencia OR, SL -5% / TP +15%) ---');
+  console.log(pad('Apalanc.',10) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [1,2,3,4,5].forEach(lev=>{
+    const r = simulateTrades(s, verdictsActual, SL_DEFAULT_PCT, TP_DEFAULT_PCT, lev);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(lev+'x',10) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
+  // C2: confluencia con OR (uno de los dos) vs AND (los dos a la vez)
+  console.log('\n--- C2: Confluencia OR (uno de los dos) vs AND (los dos a la vez) — SL -5% / TP +15%, ' + LEVERAGE + 'x ---');
+  const verdictsAnd = new Array(s.n).fill('ESPERAR');
+  for(let i=1;i<s.n;i++) verdictsAnd[i] = verdictAtVariant(s, i, 'confluencia_htf_and', mlSignal, gates);
+  const rOr = simulateTrades(s, verdictsActual, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE);
+  const rAnd = simulateTrades(s, verdictsAnd, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE);
+  console.log(pad('Modo',10) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [{label:'OR (actual)', r:rOr}, {label:'AND (estricto)', r:rAnd}].forEach(x=>{
+    const retDD = x.r.maxDrawdownPct>0 ? (x.r.totalReturnPct/x.r.maxDrawdownPct) : (x.r.totalReturnPct>0?Infinity:0);
+    console.log(pad(x.label,10) + padL(x.r.trades,9) + padL(x.r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(x.r.totalReturnPct),11) + padL('-'+x.r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
+  // C3: SL más ajustado que el probado en el Análisis B (que solo bajaba hasta -3%)
+  console.log('\n--- C3: Stop Loss afinado entre -2% y -2.5% (Confluencia OR, TP +15%, ' + LEVERAGE + 'x) ---');
+  console.log(pad('SL',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [2.0,2.1,2.2,2.3,2.4,2.5].forEach(sl=>{
+    const r = simulateTrades(s, verdictsActual, sl, TP_DEFAULT_PCT, LEVERAGE);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad('-'+sl+'%',8) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
+  // ---------- ANÁLISIS E: position sizing por riesgo fijo (sin tocar el apalancamiento) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS E — Arriesgar solo un % fijo de la cuenta por operación (leverage se mantiene en ' + LEVERAGE + 'x, SL -5% / TP +15%)');
+  console.log('========================================');
+  console.log('En vez de usar el 100% del capital en cada operación, solo se arriesga el % indicado');
+  console.log('de la cuenta total por operación (el resto queda protegido, sin exponerse). El');
+  console.log('apalancamiento sigue siendo ' + LEVERAGE + 'x dentro de esa porción arriesgada — no se toca.');
+
+  console.log('\n' + pad('% arriesgado',14) + padL('% del capital usado',20) + padL('Operac.',9) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [0.5,1,2,3,5,10,25,50,100].forEach(riskPct=>{
+    const r = simulateTradesRiskSized(s, verdictsActual, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE, riskPct);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(riskPct+'%',14) + padL(r.marginFractionPct.toFixed(1)+'%',20) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
+  // ---------- ANÁLISIS F: el indicador ORIGINAL (sin Confluencia), con position sizing ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS F — El indicador ORIGINAL (solo AO+ADX+Koncorde, sin Confluencia) con riesgo fijo por operación');
+  console.log('========================================');
+  console.log('Exactamente el mismo indicador base del dashboard HTML original — sin ningún filtro');
+  console.log('de 4H/Diario añadido. Mismo position sizing que el Análisis E, para comparar directo.');
+
+  const verdictsOriginal = new Array(s.n).fill('ESPERAR');
+  for(let i=1;i<s.n;i++) verdictsOriginal[i] = verdictAtVariant(s, i, 'adx_estricto', mlSignal, gates);
+
+  console.log('\n' + pad('% arriesgado',14) + padL('% del capital usado',20) + padL('Operac.',9) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9));
+  [0.5,1,2,3,5,10,25,50,100].forEach(riskPct=>{
+    const r = simulateTradesRiskSized(s, verdictsOriginal, SL_DEFAULT_PCT, TP_DEFAULT_PCT, LEVERAGE, riskPct);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(riskPct+'%',14) + padL(r.marginFractionPct.toFixed(1)+'%',20) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9));
+  });
+
+  // ---------- ANÁLISIS G: Confluencia SIN stop loss (solo TP o cambio de veredicto) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS G — Confluencia SIN Stop Loss (TP +15% o cambio de veredicto, ' + LEVERAGE + 'x)');
+  console.log('========================================');
+  console.log('Sin SL no hay una distancia fija con la que calcular "% de riesgo", así que aquí se');
+  console.log('prueban directamente los mismos % de capital usado por operación que en el Análisis E,');
+  console.log('para comparar en igualdad de condiciones si quitar el SL ayuda o perjudica.');
+
+  console.log('\n' + pad('% capital usado',18) + padL('Operac.',9) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9) + padL('Peor op.',10));
+  [2,4,8,12,20,40,100].forEach(marginPct=>{
+    const r = simulateTradesNoSL(s, verdictsActual, TP_DEFAULT_PCT, LEVERAGE, marginPct/100);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(marginPct+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9) + padL(r.peorOperacionPct.toFixed(1)+'%',10));
+  });
+
+  // ---------- ANÁLISIS H: validación fuera de muestra (tramo reservado) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS H — Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados, nunca usados para elegir nada');
+  console.log('========================================');
+  console.log('Configuración elegida con el resto del histórico: Confluencia + SIN Stop Loss + TP +15%,');
+  console.log('5x, 8% del capital por operación (el pico encontrado en el Análisis G).');
+  console.log('Aquí se separan las operaciones en dos grupos según su fecha de ENTRADA:');
+  console.log('  - "Resto del histórico": todo lo anterior al tramo reservado (esto es lo que ya vimos).');
+  console.log('  - "Tramo reservado": solo los últimos ' + MESES_RESERVADOS + ' meses, evaluados de forma aislada,');
+  console.log('    como si fueran un periodo nuevo e independiente (empezando con capital fresco).');
+
+  const cutoffReservadoTime = ohlcv.times[ohlcv.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const rConSplit = simulateTradesNoSL(s, verdictsActual, TP_DEFAULT_PCT, LEVERAGE, 0.08);
+  const tradesAntes = rConSplit.tradeLog.filter(t => s.times[t.entryIdx] < cutoffReservadoTime);
+  const tradesReservado = rConSplit.tradeLog.filter(t => s.times[t.entryIdx] >= cutoffReservadoTime);
+
+  const mAntes = metricsForTradeSubset(tradesAntes);
+  const mReservado = metricsForTradeSubset(tradesReservado);
+
+  console.log('\n' + pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntes.trades,9) + padL(mAntes.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntes.totalReturnPct),12) + padL('-'+mAntes.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntes.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservado.trades,9) + padL(mReservado.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservado.totalReturnPct),12) + padL('-'+mReservado.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservado.profitFactor.toFixed(2),10));
+
+  console.log('\nOJO: esto NO es una validación perfecta — la elección de "Confluencia + sin SL + 8%"');
+  console.log('se basó en el retorno agregado de TODO el periodo (incluido este tramo reservado),');
+  console.log('así que no es un fuera-de-muestra puro. Pero si el profit factor y el % de acierto');
+  console.log('del tramo reservado son similares (o mejores) que el resto, es una señal razonable');
+  console.log('de que la ventaja no depende solo de un tramo antiguo concreto del histórico.');
+
+  // ---------- ANÁLISIS I: Confluencia SIN SL, con el nuevo TP del bot en vivo (3% de precio = 15% sobre la posición con 5x) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS I — Confluencia SIN Stop Loss, TP al 3% de precio (=15% sobre la posición con 5x)');
+  console.log('========================================');
+  console.log('Mismo barrido de % de capital usado que el Análisis G, pero con el TP ajustado');
+  console.log('para que sea un 15% de beneficio SOBRE LA POSICIÓN apalancada, no un 15% de precio.');
+  console.log('Con 5x, eso significa que el precio solo tiene que moverse un 3% para tocar el TP.');
+
+  const TP_LEVERAGED_PCT = 3; // 15 (objetivo sobre la posición) / 5 (leverage) = 3% de precio
+
+  console.log('\n' + pad('% capital usado',18) + padL('Operac.',9) + padL('Retorno',11) + padL('Drawdown',11) + padL('Ret/DD',9) + padL('Peor op.',10));
+  [2,4,8,12,20,40,100].forEach(marginPct=>{
+    const r = simulateTradesNoSL(s, verdictsActual, TP_LEVERAGED_PCT, LEVERAGE, marginPct/100);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad(marginPct+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),11) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(retDD.toFixed(2),9) + padL(r.peorOperacionPct.toFixed(1)+'%',10));
+  });
+
+  // ---------- ANÁLISIS J: impacto de comisiones y funding reales de Bitget ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS J — Impacto de comisiones y funding reales de Bitget (USDT-M, margen aislado)');
+  console.log('========================================');
+  console.log('Comisiones: entrada y cierre por veredicto = taker (0.06%) · cierre por TP = maker (0.02%).');
+  console.log('Funding: 0.01% del nocional cada 8h que la posición sigue abierta (estimación conservadora;');
+  console.log('el funding real fluctúa entre -0.05% y +0.05% y puede ir a tu favor o en tu contra).');
+  console.log('TP al 3% de precio (=15% sobre la posición con 5x) — la configuración ganadora actual.');
+
+  const TP_ACTUAL_PCT = 3;
+  console.log('\n--- Con TP al 3% de precio (config. actual, ' + s.n + ' velas totales) ---');
+  console.log(pad('% capital usado',18) + padL('Sin comisiones',16) + padL('Con comisiones',16) + padL('Diferencia',12) + padL('Comis.totales',14));
+  [2,4,8,12,20,40,100].forEach(marginPct=>{
+    const rSin = simulateTradesNoSL(s, verdictsActual, TP_ACTUAL_PCT, LEVERAGE, marginPct/100);
+    const rCon = simulateTradesNoSLConFees(s, verdictsActual, TP_ACTUAL_PCT, LEVERAGE, marginPct/100);
+    const diferencia = rCon.totalReturnPct - rSin.totalReturnPct;
+    console.log(pad(marginPct+'%',18) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(fmtPct(diferencia),12) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14));
+  });
+
+  // ---------- Comparación: ¿el TP ancho (15%, menos operaciones) aguanta mejor las comisiones? ----------
+  console.log('\n--- Con TP al 15% de precio (el original, menos operaciones — para comparar el efecto de la frecuencia) ---');
+  console.log(pad('% capital usado',18) + padL('Sin comisiones',16) + padL('Con comisiones',16) + padL('Diferencia',12) + padL('Comis.totales',14) + padL('Operac.',9));
+  [2,4,8,12,20,40,100].forEach(marginPct=>{
+    const rSin = simulateTradesNoSL(s, verdictsActual, 15, LEVERAGE, marginPct/100);
+    const rCon = simulateTradesNoSLConFees(s, verdictsActual, 15, LEVERAGE, marginPct/100);
+    const diferencia = rCon.totalReturnPct - rSin.totalReturnPct;
+    console.log(pad(marginPct+'%',18) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(fmtPct(diferencia),12) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14) + padL(rCon.trades,9));
+  });
+
+  // ---------- ANÁLISIS K: señal en 4H (confirmada por Diario), con comisiones desde el principio ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS K — Señal generada en 4H (confirmada por Diario), no en 1H — para reducir la frecuencia');
+  console.log('========================================');
+  console.log('Misma lógica de Confluencia, pero un escalón más arriba: el 4H tiene que dar su propia');
+  console.log('señal completa (AO+ADX+Koncorde), confirmada por el Diario (AO+Koncorde). Sin Stop Loss.');
+  console.log('Comisiones y funding de Bitget incluidos desde el principio (velas de 4H → funding cada');
+  console.log('8h = cada 2 velas).');
+
+  // Construye el veredicto en la propia serie de 4H, usando el Diario como
+  // confirmación (mismo patrón que buildConfluenceGates, pero un nivel más
+  // arriba: aquí NO hace falta la puerta OR con 4H, porque el 4H ES la señal).
+  function buildVerdicts4H(series4H, seriesD){
+    const idxD = alignDailyIndex(seriesD, series4H.times);
+    const n = series4H.n;
+    const verdicts = new Array(n).fill('ESPERAR');
+    for(let i=1;i<n;i++){
+      const iD = idxD[i];
+      const aoAlcista = series4H.aoState[i]==='Alcista', aoBajista = series4H.aoState[i]==='Bajista';
+      const dailyBullish = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+      const dailyBearish = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+      let comprarOk = aoAlcista && series4H.adxSubiendo[i] && series4H.koBull[i] && dailyBullish;
+      let venderOk  = aoBajista && series4H.adxSubiendo[i] && series4H.koBear[i] && dailyBearish;
+      let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
+      if(!isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i]){
+        verdict = 'VENDER';
+      }
+      verdicts[i] = verdict;
+    }
+    return verdicts;
+  }
+
+  // Réplica fiel del ENHANCED_FILTER del bot original: exige que AO+ADX
+  // confirmen con CONFIRM_LOOKBACK velas de continuidad (no solo 1), que el
+  // ADX esté por encima de ADX_MIN_LEVEL (tendencia real según Wilder), y
+  // que el BBWP esté por encima de BBWP_MIN_LEVEL (sin compresión extrema).
+  // Igual que en el diseño original, esto SOLO endurece el lado comprador —
+  // las ventas (y el cierre forzado por Koncorde) usan siempre la lectura
+  // estándar de 1 vela, para no retrasar nunca una salida.
+  const CONFIRM_LOOKBACK = 3, ADX_MIN_LEVEL = 20, BBWP_MIN_LEVEL = 25;
+  function momentumState(series, i, lookback){
+    if(i < lookback || isNaN(series.ao[i]) || isNaN(series.ao[i-lookback])){
+      return { aoState:'Sin datos', adxSubiendo:false };
+    }
+    const subiendo = series.ao[i] > series.ao[i-lookback];
+    let aoState;
+    if(series.ao[i]>=0 && subiendo) aoState='Alcista';
+    else if(series.ao[i]>=0 && !subiendo) aoState='Retroceso alcista';
+    else if(series.ao[i]<0 && !subiendo) aoState='Bajista';
+    else aoState='Retroceso bajista';
+    const adxSubiendo = !isNaN(series.adx[i]) && !isNaN(series.adx[i-lookback]) && series.adx[i] > series.adx[i-lookback];
+    return { aoState, adxSubiendo };
+  }
+  function buildVerdicts4HEnhanced(series4H, seriesD){
+    const idxD = alignDailyIndex(seriesD, series4H.times);
+    const n = series4H.n;
+    const verdicts = new Array(n).fill('ESPERAR');
+    for(let i=1;i<n;i++){
+      const iD = idxD[i];
+      const entryMs = momentumState(series4H, i, CONFIRM_LOOKBACK); // solo para el lado comprador
+      const aoBajista = series4H.aoState[i]==='Bajista'; // el lado vendedor sigue con lectura estándar (1 vela)
+      const dailyBullish = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+      const dailyBearish = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+      const adxFloorOk = !isNaN(series4H.adx[i]) && series4H.adx[i] >= ADX_MIN_LEVEL;
+      const bbwpOk = !isNaN(series4H.bbwp[i]) && series4H.bbwp[i] > BBWP_MIN_LEVEL;
+      let comprarOk = entryMs.aoState==='Alcista' && entryMs.adxSubiendo && series4H.koBull[i] && dailyBullish && adxFloorOk && bbwpOk;
+      let venderOk  = aoBajista && series4H.adxSubiendo[i] && series4H.koBear[i] && dailyBearish;
+      let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
+      if(!isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i]){
+        verdict = 'VENDER';
+      }
+      verdicts[i] = verdict;
+    }
+    return verdicts;
+  }
+
+  // Igual que la reforzada, pero aplicando el MISMO filtro (3 velas + ADX>=20
+  // + BBWP>25) también al lado vendedor — no es el diseño original del bot,
+  // es una variante simétrica para comprobar si el problema de 2021 estaba
+  // concentrado en los cortos (que la versión asimétrica dejaba sin tocar).
+  // El cierre forzado por Koncorde sigue sin verse afectado en ningún caso.
+  function buildVerdicts4HEnhancedBoth(series4H, seriesD){
+    const idxD = alignDailyIndex(seriesD, series4H.times);
+    const n = series4H.n;
+    const verdicts = new Array(n).fill('ESPERAR');
+    for(let i=1;i<n;i++){
+      const iD = idxD[i];
+      const entryMs = momentumState(series4H, i, CONFIRM_LOOKBACK); // ahora para los dos lados
+      const dailyBullish = iD>=0 && seriesD.aoState[iD]==='Alcista' && seriesD.koBull[iD];
+      const dailyBearish = iD>=0 && seriesD.aoState[iD]==='Bajista' && seriesD.koBear[iD];
+      const adxFloorOk = !isNaN(series4H.adx[i]) && series4H.adx[i] >= ADX_MIN_LEVEL;
+      const bbwpOk = !isNaN(series4H.bbwp[i]) && series4H.bbwp[i] > BBWP_MIN_LEVEL;
+      let comprarOk = entryMs.aoState==='Alcista' && entryMs.adxSubiendo && series4H.koBull[i] && dailyBullish && adxFloorOk && bbwpOk;
+      let venderOk  = entryMs.aoState==='Bajista' && entryMs.adxSubiendo && series4H.koBear[i] && dailyBearish && adxFloorOk && bbwpOk;
+      let verdict = comprarOk ? 'COMPRAR' : (venderOk ? 'VENDER' : 'ESPERAR');
+      if(!isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i]){
+        verdict = 'VENDER';
+      }
+      verdicts[i] = verdict;
+    }
+    return verdicts;
+  }
+
+  const verdicts4H = buildVerdicts4H(s4H, sD);
+  const numSenales4H = verdicts4H.filter(v=>v!=='ESPERAR').length;
+  console.log('\nVelas de 4H con señal activa: ' + numSenales4H + ' de ' + s4H.n + ' (frente a las ' + s.n + ' velas de 1H)');
+
+  [
+    {label:'TP 3% de precio (=15% posición con 5x)', tp:3},
+    {label:'TP 15% de precio (=75% posición con 5x)', tp:15}
+  ].forEach(cfg=>{
+    console.log('\n--- ' + cfg.label + ' ---');
+    console.log(pad('% capital usado',18) + padL('Operac.',9) + padL('Sin comisiones',16) + padL('Con comisiones',16) + padL('Comis.totales',14));
+    [2,4,8,12,20,40,100].forEach(marginPct=>{
+      const rSin = simulateTradesNoSL(s4H, verdicts4H, cfg.tp, LEVERAGE, marginPct/100);
+      const rCon = simulateTradesNoSLConFees(s4H, verdicts4H, cfg.tp, LEVERAGE, marginPct/100, 4); // velas de 4H
+      console.log(pad(marginPct+'%',18) + padL(rCon.trades,9) + padL(fmtPct(rSin.totalReturnPct),16) + padL(fmtPct(rCon.totalReturnPct),16) + padL(rCon.totalComisionesPct.toFixed(1)+'%',14));
+    });
+  });
+
+  // ---------- ANÁLISIS L: validación fuera de muestra de la señal en 4H, CON comisiones ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS L — Validación fuera de muestra de la señal en 4H, con comisiones (últimos ' + MESES_RESERVADOS + ' meses reservados)');
+  console.log('========================================');
+  console.log('Misma idea que el Análisis H, pero con la señal de 4H (Análisis K) y las comisiones');
+  console.log('reales de Bitget ya incluidas en el propio cálculo, no añadidas después.');
+
+  const cutoffReservado4H = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+
+  [
+    {label:'TP 3% de precio, 12% capital', tp:3, margin:0.12},
+    {label:'TP 3% de precio, 20% capital', tp:3, margin:0.20},
+    {label:'TP 15% de precio, 12% capital', tp:15, margin:0.12},
+    {label:'TP 15% de precio, 20% capital', tp:15, margin:0.20}
+  ].forEach(cfg=>{
+    console.log('\n--- ' + cfg.label + ' ---');
+    const rFull = simulateTradesNoSLConFees(s4H, verdicts4H, cfg.tp, LEVERAGE, cfg.margin, 4);
+    const tradesAntes4H = rFull.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservado4H);
+    const tradesReservado4H = rFull.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservado4H);
+    const mAntes4H = metricsForTradeSubset(tradesAntes4H);
+    const mReservado4H = metricsForTradeSubset(tradesReservado4H);
+    console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+    console.log(pad('Resto del histórico',20) + padL(mAntes4H.trades,9) + padL(mAntes4H.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntes4H.totalReturnPct),12) + padL('-'+mAntes4H.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntes4H.profitFactor.toFixed(2),10));
+    console.log(pad('TRAMO RESERVADO',20) + padL(mReservado4H.trades,9) + padL(mReservado4H.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservado4H.totalReturnPct),12) + padL('-'+mReservado4H.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservado4H.profitFactor.toFixed(2),10));
+  });
+
+  console.log('\nOJO: misma salvedad que el Análisis H — la elección de esta configuración se basó en el');
+  console.log('retorno agregado de TODO el periodo (incluido el tramo reservado), así que no es un');
+  console.log('fuera-de-muestra puro. Pero si el tramo reservado aguanta igual o mejor que el resto,');
+  console.log('es una señal razonable de que la ventaja no depende solo de una parte antigua del histórico.');
+
+  // ---------- ANÁLISIS M: walk-forward — desglose año por año (todos fuera de muestra entre sí) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS M — Walk-forward: desglose por año calendario, señal en 4H con comisiones');
+  console.log('========================================');
+  console.log('En vez de un único tramo "reservado", aquí se parte TODO el histórico en años');
+  console.log('calendario y se calcula cada año POR SEPARADO (capital fresco, sin arrastrar nada');
+  console.log('de los años anteriores) — así vemos si la ventaja se sostiene año tras año, o si');
+  console.log('depende de uno o dos años concretos que están arrastrando la media hacia arriba.');
+
+  function bucketizeTradesByCalendarYear(tradeLog, times){
+    const buckets = {};
+    tradeLog.forEach(t=>{
+      const year = new Date(times[t.entryIdx]).getUTCFullYear();
+      if(!buckets[year]) buckets[year] = [];
+      buckets[year].push(t);
+    });
+    return buckets;
+  }
+
+  [
+    {label:'TP 3% de precio, 12% capital', tp:3, margin:0.12},
+    {label:'TP 15% de precio, 12% capital', tp:15, margin:0.12}
+  ].forEach(cfg=>{
+    console.log('\n--- ' + cfg.label + ' ---');
+    const rFull = simulateTradesNoSLConFees(s4H, verdicts4H, cfg.tp, LEVERAGE, cfg.margin, 4);
+    const buckets = bucketizeTradesByCalendarYear(rFull.tradeLog, s4H.times);
+    const years = Object.keys(buckets).map(Number).sort((a,b)=>a-b);
+    console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+    years.forEach(year=>{
+      const m = metricsForTradeSubset(buckets[year]);
+      console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    });
+    const aniosPositivos = years.filter(y=>metricsForTradeSubset(buckets[y]).totalReturnPct>0).length;
+    console.log('Años con retorno positivo: ' + aniosPositivos + ' de ' + years.length);
+  });
+
+  // ---------- ANÁLISIS N: SL ancho como cortafuegos ante movimientos extremos (tipo 2021) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS N — Stop Loss ANCHO como cortafuegos (no como gestión normal), señal en 4H con comisiones');
+  console.log('========================================');
+  console.log('El walk-forward mostró que 2021 perdió dinero con un % de acierto NORMAL, pero con');
+  console.log('pérdidas individuales enormes (sin SL, el precio se movió mucho en contra antes de que');
+  console.log('el veredicto cambiara). Aquí se prueba un SL muy ancho — pensado solo para cortar esos');
+  console.log('movimientos extremos, no para intervenir en el día a día — y se mide su efecto tanto en');
+  console.log('el conjunto como específicamente en 2021.');
+
+  const anchosSL = [15, 20, 25, 30, 40, 50]; // % de movimiento de PRECIO — muy ancho a propósito
+  console.log('\n--- TP 3% de precio, 12% capital (la configuración ganadora) ---');
+  console.log(pad('SL ancho',10) + padL('Operac.',9) + padL('Cierres/SL',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  // Referencia sin SL (ya la conocemos, pero se repite aquí para comparar en la misma tabla)
+  const rSinSL = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4);
+  console.log(pad('(sin SL)',10) + padL(rSinSL.trades,9) + padL('—',11) + padL(fmtPct(rSinSL.totalReturnPct),12) + padL('-'+rSinSL.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSinSL.profitFactor.toFixed(2),10));
+  anchosSL.forEach(sl=>{
+    const r = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4, sl);
+    console.log(pad('-'+sl+'%',10) + padL(r.trades,9) + padL(r.cierresPorSL,11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
+  });
+
+  console.log('\n--- Efecto específico en el año 2021 (el más afectado) ---');
+  console.log(pad('SL ancho',10) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  [null, 15, 20, 25, 30].forEach(sl=>{
+    const r = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4, sl);
+    const buckets2021 = r.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === 2021);
+    const m2021 = metricsForTradeSubset(buckets2021);
+    console.log(pad(sl==null?'(sin SL)':'-'+sl+'%',10) + padL(m2021.trades,9) + padL(fmtPct(m2021.totalReturnPct),12) + padL('-'+m2021.maxDrawdownPct.toFixed(1)+'%',11) + padL(m2021.profitFactor.toFixed(2),10));
+  });
+
+  // ---------- ANÁLISIS O: filtro reforzado (3 velas + ADX>=20 + BBWP>25) vs normal ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS O — Filtro reforzado (ENHANCED_FILTER del bot original) vs señal normal, en 4H con comisiones');
+  console.log('========================================');
+  console.log('El filtro reforzado exige, SOLO para comprar: AO+ADX confirmando con 3 velas de');
+  console.log('continuidad (no 1), ADX >= 20, y BBWP > 25. Las ventas y el cierre forzado por Koncorde');
+  console.log('siguen igual que siempre. Objetivo: menos señales, de más calidad, en años revueltos.');
+
+  const verdicts4HEnhanced = buildVerdicts4HEnhanced(s4H, sD);
+  const verdicts4HEnhancedBoth = buildVerdicts4HEnhancedBoth(s4H, sD);
+  const numSenalesEnhanced = verdicts4HEnhanced.filter(v=>v!=='ESPERAR').length;
+  const numSenalesBoth = verdicts4HEnhancedBoth.filter(v=>v!=='ESPERAR').length;
+  console.log('\nVelas con señal activa — normal: ' + numSenales4H + ' · reforzada (solo largos): ' + numSenalesEnhanced + ' · reforzada (los dos lados): ' + numSenalesBoth);
+
+  console.log('\n--- Conjunto completo (TP 3% de precio, 12% capital) ---');
+  console.log(pad('Variante',20) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const rNormal = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4);
+  const rEnhanced = simulateTradesNoSLConFees(s4H, verdicts4HEnhanced, 3, LEVERAGE, 0.12, 4);
+  const rBoth = simulateTradesNoSLConFees(s4H, verdicts4HEnhancedBoth, 3, LEVERAGE, 0.12, 4);
+  console.log(pad('Normal',20) + padL(rNormal.trades,9) + padL(fmtPct(rNormal.totalReturnPct),12) + padL('-'+rNormal.maxDrawdownPct.toFixed(1)+'%',11) + padL(rNormal.profitFactor.toFixed(2),10));
+  console.log(pad('Reforzada (largos)',20) + padL(rEnhanced.trades,9) + padL(fmtPct(rEnhanced.totalReturnPct),12) + padL('-'+rEnhanced.maxDrawdownPct.toFixed(1)+'%',11) + padL(rEnhanced.profitFactor.toFixed(2),10));
+  console.log(pad('Reforzada (ambos)',20) + padL(rBoth.trades,9) + padL(fmtPct(rBoth.totalReturnPct),12) + padL('-'+rBoth.maxDrawdownPct.toFixed(1)+'%',11) + padL(rBoth.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Año por año, las tres variantes (TP 3%, 12% capital) ---');
+  console.log(pad('Año',8) + padL('PF Normal',11) + padL('PF Reforz.Larg',15) + padL('PF Reforz.Ambos',16) + padL('Ret Normal',13) + padL('Ret Ambos',12));
+  for(let year=2017; year<=2026; year++){
+    const bucketsN = rNormal.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    const bucketsE = rEnhanced.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    const bucketsB = rBoth.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    if(bucketsN.length===0 && bucketsE.length===0 && bucketsB.length===0) continue;
+    const mN = metricsForTradeSubset(bucketsN);
+    const mE = metricsForTradeSubset(bucketsE);
+    const mB = metricsForTradeSubset(bucketsB);
+    console.log(pad(String(year),8) + padL(mN.profitFactor.toFixed(2),11) + padL(mE.profitFactor.toFixed(2),15) + padL(mB.profitFactor.toFixed(2),16) + padL(fmtPct(mN.totalReturnPct),13) + padL(fmtPct(mB.totalReturnPct),12));
+  }
+
+  // ---------- ANÁLISIS P: nueva salida (AO retroceso + cambio de dirección del ADX) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS P — Salida alternativa: AO en Retroceso + ADX cambia de dirección (a la vez)');
+  console.log('========================================');
+  console.log('En vez de cerrar en cuanto CUALQUIERA de las condiciones de entrada falla, esta versión');
+  console.log('aguanta mientras solo falle una — y solo cierra cuando el AO muestra Retroceso del');
+  console.log('movimiento principal Y el ADX deja de subir A LA VEZ. El TP y el cierre forzado por');
+  console.log('Koncorde se mantienen exactamente igual que en la versión validada.');
+
+  console.log('\n--- Comparación directa (TP 3% de precio, 12% capital) ---');
+  console.log(pad('Variante',22) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const rSalidaActual = simulateTradesNoSLConFees(s4H, verdicts4H, 3, LEVERAGE, 0.12, 4);
+  const rSalidaNueva = simulateConfluenciaSalidaAoAdx(s4H, sD, 3, LEVERAGE, 0.12, 4);
+  console.log(pad('Salida actual',22) + padL(rSalidaActual.trades,9) + padL(rSalidaActual.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSalidaActual.totalReturnPct),12) + padL('-'+rSalidaActual.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSalidaActual.profitFactor.toFixed(2),10));
+  console.log(pad('Salida AO+ADX',22) + padL(rSalidaNueva.trades,9) + padL(rSalidaNueva.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSalidaNueva.totalReturnPct),12) + padL('-'+rSalidaNueva.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSalidaNueva.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Año por año, las dos salidas (TP 3%, 12% capital) ---');
+  console.log(pad('Año',8) + padL('PF Actual',11) + padL('PF AO+ADX',11) + padL('Ret Actual',13) + padL('Ret AO+ADX',13));
+  for(let year=2017; year<=2026; year++){
+    const bucketsA = rSalidaActual.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    const bucketsN = rSalidaNueva.tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear() === year);
+    if(bucketsA.length===0 && bucketsN.length===0) continue;
+    const mA = metricsForTradeSubset(bucketsA);
+    const mN = metricsForTradeSubset(bucketsN);
+    console.log(pad(String(year),8) + padL(mA.profitFactor.toFixed(2),11) + padL(mN.profitFactor.toFixed(2),11) + padL(fmtPct(mA.totalReturnPct),13) + padL(fmtPct(mN.totalReturnPct),13));
+  }
 
   console.log('\n=== Fin del backtest ===');
 }
