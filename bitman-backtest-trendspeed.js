@@ -84,6 +84,90 @@ function highestPeriod(values,period){
   return out;
 }
 
+// ---------- AO + ADX (motor ya validado en la Confluencia) ----------
+function safeDiv(a,b){
+  if(b===0||b==null||a==null||isNaN(a)||isNaN(b)) return 0;
+  const r=a/b; return isFinite(r)?r:0;
+}
+function sma(values,period){
+  const out=new Array(values.length).fill(NaN);
+  let sum=0, count=0;
+  for(let i=0;i<values.length;i++){
+    const v=values[i];
+    if(v!=null && !isNaN(v)){ sum+=v; count++; }
+    if(i>=period){
+      const old=values[i-period];
+      if(old!=null && !isNaN(old)){ sum-=old; count--; }
+    }
+    if(i>=period-1 && count===period) out[i]=sum/period;
+  }
+  return out;
+}
+function awesomeOscillator(highs,lows){
+  const n=highs.length;
+  const median=highs.map((h,i)=>(h+lows[i])/2);
+  const fast=sma(median,5), slow=sma(median,34);
+  const out=new Array(n).fill(NaN);
+  for(let i=0;i<n;i++) if(!isNaN(fast[i])&&!isNaN(slow[i])) out[i]=fast[i]-slow[i];
+  return out;
+}
+function adxWilder(highs,lows,closes,period){
+  const n=closes.length;
+  const tr=new Array(n).fill(0), plusDM=new Array(n).fill(0), minusDM=new Array(n).fill(0);
+  for(let i=1;i<n;i++){
+    const hd=highs[i]-highs[i-1], ld=lows[i-1]-lows[i];
+    plusDM[i]=(hd>ld&&hd>0)?hd:0;
+    minusDM[i]=(ld>hd&&ld>0)?ld:0;
+    tr[i]=Math.max(highs[i]-lows[i],Math.abs(highs[i]-closes[i-1]),Math.abs(lows[i]-closes[i-1]));
+  }
+  const smTR=new Array(n).fill(NaN), smP=new Array(n).fill(NaN), smM=new Array(n).fill(NaN);
+  const plusDI=new Array(n).fill(NaN), minusDI=new Array(n).fill(NaN), dx=new Array(n).fill(NaN), adx=new Array(n).fill(NaN);
+  let trSum=0,pSum=0,mSum=0;
+  for(let i=1;i<=period&&i<n;i++){ trSum+=tr[i]; pSum+=plusDM[i]; mSum+=minusDM[i]; }
+  if(period<n){ smTR[period]=trSum; smP[period]=pSum; smM[period]=mSum; }
+  for(let i=period+1;i<n;i++){
+    smTR[i]=smTR[i-1]-safeDiv(smTR[i-1],period)+tr[i];
+    smP[i]=smP[i-1]-safeDiv(smP[i-1],period)+plusDM[i];
+    smM[i]=smM[i-1]-safeDiv(smM[i-1],period)+minusDM[i];
+  }
+  for(let i=period;i<n;i++){
+    plusDI[i]=safeDiv(smP[i]*100,smTR[i]);
+    minusDI[i]=safeDiv(smM[i]*100,smTR[i]);
+    dx[i]=safeDiv(Math.abs(plusDI[i]-minusDI[i])*100,(plusDI[i]+minusDI[i]));
+  }
+  let firstAdxIndex=period+period, dxSum=0,count=0;
+  for(let i=period;i<n;i++){
+    if(!isNaN(dx[i])){
+      dxSum+=dx[i]; count++;
+      if(count===period){ adx[i]=dxSum/period; firstAdxIndex=i; break; }
+    }
+  }
+  for(let i=firstAdxIndex+1;i<n;i++){
+    if(isNaN(dx[i])||isNaN(adx[i-1])) continue;
+    adx[i]=(adx[i-1]*(period-1)+dx[i])/period;
+  }
+  return {adx,plusDI,minusDI};
+}
+// Clasificación estándar (1 vela de lookback, la misma que usa toda la sesión)
+function computeAoAdxState(highs,lows,closes){
+  const n=closes.length;
+  const ao = awesomeOscillator(highs,lows);
+  const {adx} = adxWilder(highs,lows,closes,14);
+  const aoState = new Array(n).fill('Sin datos');
+  const adxSubiendo = new Array(n).fill(false);
+  for(let i=1;i<n;i++){
+    if(!isNaN(ao[i]) && !isNaN(ao[i-1])){
+      const subiendo = ao[i] > ao[i-1];
+      if(ao[i]>=0 && subiendo) aoState[i]='Alcista';
+      else if(ao[i]>=0 && !subiendo) aoState[i]='Retroceso alcista';
+      else if(ao[i]<0 && !subiendo) aoState[i]='Bajista';
+      else aoState[i]='Retroceso bajista';
+    }
+    if(!isNaN(adx[i]) && !isNaN(adx[i-1])) adxSubiendo[i] = adx[i] > adx[i-1];
+  }
+  return { ao, adx, aoState, adxSubiendo };
+}
+
 // ============================================================
 // TREND SPEED ANALYZER [Zeiierman] — motor replicado del Pine
 // ============================================================
@@ -221,11 +305,11 @@ const BITGET_TAKER_FEE_PCT = 0.06;
 const BITGET_FUNDING_PCT_PER_8H = 0.01;
 
 // Simulador LARGO-SOLO: entra cuando el cierre pasa por ENCIMA de la EMA
-// dinámica (cruce), sale cuando una vela CIERRA por debajo de ella. Sin TP
-// ni SL — el único gatillo es la propia línea. Ambos lados (entrada y
-// salida) se tratan como taker (a mercado), ya que no hay ninguna orden
-// límite predefinida en este diseño tan simple.
-function simulateTrendSpeedLongOnly(closes, times, dynEma, leverage, marginFraction, horasPorVela){
+// dinámica (cruce) Y ADEMÁS AO está "Alcista" Y ADX está subiendo. Sale
+// cuando una vela CIERRA por debajo de la línea (sin cambios respecto a
+// la versión anterior — el filtro extra solo endurece la ENTRADA).
+// Si no se pasan aoState/adxSubiendo, se comporta igual que antes (solo cruce).
+function simulateTrendSpeedLongOnly(closes, times, dynEma, leverage, marginFraction, horasPorVela, aoState, adxSubiendo){
   const n = closes.length;
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
   let inPosition = false, entryPrice = null, entryIdx = null;
@@ -254,7 +338,8 @@ function simulateTrendSpeedLongOnly(closes, times, dynEma, leverage, marginFract
     }
     if(!inPosition){
       const cruceAlcista = closes[i] > dynEma[i] && closes[i-1] <= dynEma[i-1];
-      if(cruceAlcista){
+      const filtroOk = !aoState || (aoState[i]==='Alcista' && adxSubiendo[i]);
+      if(cruceAlcista && filtroOk){
         inPosition = true; entryPrice = closes[i]; entryIdx = i;
         const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
         equity *= Math.max(0, 1 - comisionEntradaPct/100);
@@ -309,16 +394,24 @@ async function analizarTemporalidad(interval, label, horasPorVela){
 
   const ts = computeTrendSpeed(ohlcv.closes, ohlcv.opens);
   const dynEma = ts.dynEma;
+  const { aoState, adxSubiendo } = computeAoAdxState(ohlcv.highs, ohlcv.lows, ohlcv.closes);
 
-  console.log('\n--- Barrido de capital usado por operación (TP: ninguno, solo cruce de la línea) ---');
+  console.log('\n--- Solo cruce vs cruce+AO+ADX (12% de capital) ---');
+  console.log(pad('Variante',16) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const rSoloCruce = simulateTrendSpeedLongOnly(ohlcv.closes, ohlcv.times, dynEma, LEVERAGE, 0.12, horasPorVela);
+  const rConFiltro = simulateTrendSpeedLongOnly(ohlcv.closes, ohlcv.times, dynEma, LEVERAGE, 0.12, horasPorVela, aoState, adxSubiendo);
+  console.log(pad('Solo cruce',16) + padL(rSoloCruce.trades,9) + padL(rSoloCruce.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSoloCruce.totalReturnPct),12) + padL('-'+rSoloCruce.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSoloCruce.profitFactor.toFixed(2),10));
+  console.log(pad('+ AO + ADX',16) + padL(rConFiltro.trades,9) + padL(rConFiltro.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rConFiltro.totalReturnPct),12) + padL('-'+rConFiltro.maxDrawdownPct.toFixed(1)+'%',11) + padL(rConFiltro.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Barrido de capital usado, CON el filtro AO+ADX ---');
   console.log(pad('% capital usado',18) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
   [2,4,8,12,20].forEach(marginPct=>{
-    const r = simulateTrendSpeedLongOnly(ohlcv.closes, ohlcv.times, dynEma, LEVERAGE, marginPct/100, horasPorVela);
+    const r = simulateTrendSpeedLongOnly(ohlcv.closes, ohlcv.times, dynEma, LEVERAGE, marginPct/100, horasPorVela, aoState, adxSubiendo);
     console.log(pad(marginPct+'%',18) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
   });
 
-  console.log('\n--- Walk-forward año por año (12% de capital) ---');
-  const rWF = simulateTrendSpeedLongOnly(ohlcv.closes, ohlcv.times, dynEma, LEVERAGE, 0.12, horasPorVela);
+  console.log('\n--- Walk-forward año por año, CON el filtro AO+ADX (12% de capital) ---');
+  const rWF = rConFiltro;
   console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
   const buckets = {};
   rWF.tradeLog.forEach(t=>{
@@ -341,7 +434,7 @@ async function analizarTemporalidad(interval, label, horasPorVela){
   const tradesReservado = rWF.tradeLog.filter(t => ohlcv.times[t.entryIdx] >= cutoffReservado);
   const mAntes = metricsForTradeSubset(tradesAntes);
   const mReservado = metricsForTradeSubset(tradesReservado);
-  console.log('\n--- Fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados (12% capital) ---');
+  console.log('\n--- Fuera de muestra, CON el filtro AO+ADX: últimos ' + MESES_RESERVADOS + ' meses reservados (12% capital) ---');
   console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('P.Factor',10));
   console.log(pad('Resto del histórico',20) + padL(mAntes.trades,9) + padL(mAntes.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntes.totalReturnPct),12) + padL(mAntes.profitFactor.toFixed(2),10));
   console.log(pad('TRAMO RESERVADO',20) + padL(mReservado.trades,9) + padL(mReservado.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservado.totalReturnPct),12) + padL(mReservado.profitFactor.toFixed(2),10));
