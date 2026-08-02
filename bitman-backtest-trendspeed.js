@@ -1953,6 +1953,47 @@ async function main(){
   });
 
 
+  // ---------- ANÁLISIS X: TP parcial 20% (con 5x): validación fuera de muestra + walk-forward ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS X — TP parcial 20% (con 5x, sin breakeven): validación fuera de muestra + walk-forward');
+  console.log('========================================');
+  console.log('Misma prueba que el Análisis S/T, pero para el nuevo reparto 20/80 encontrado en el');
+  console.log('Análisis W como el mejor punto de drawdown con el apalancamiento real (5x).');
+
+  const rParcial20 = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+
+  console.log('\n--- Comparación directa con el 50/50 actual (12% capital, 5x) ---');
+  console.log(pad('Variante',18) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('20/80 (nuevo)',18) + padL(rParcial20.trades,9) + padL(rParcial20.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rParcial20.totalReturnPct),12) + padL('-'+rParcial20.maxDrawdownPct.toFixed(1)+'%',11) + padL(rParcial20.profitFactor.toFixed(2),10));
+  console.log(pad('50/50 (actual)',18) + padL(rParcialSinBE.trades,9) + padL(rParcialSinBE.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rParcialSinBE.totalReturnPct),12) + padL('-'+rParcialSinBE.maxDrawdownPct.toFixed(1)+'%',11) + padL(rParcialSinBE.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados ---');
+  const cutoffReservado20 = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntes20 = rParcial20.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservado20);
+  const tradesReservado20 = rParcial20.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservado20);
+  const mAntes20 = metricsForTradeSubset(tradesAntes20);
+  const mReservado20 = metricsForTradeSubset(tradesReservado20);
+  console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntes20.trades,9) + padL(mAntes20.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntes20.totalReturnPct),12) + padL('-'+mAntes20.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntes20.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservado20.trades,9) + padL(mReservado20.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservado20.totalReturnPct),12) + padL('-'+mReservado20.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservado20.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Walk-forward año por año ---');
+  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const buckets20 = {};
+  rParcial20.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!buckets20[year]) buckets20[year] = [];
+    buckets20[year].push(t);
+  });
+  let aniosPositivos20 = 0, aniosTotal20 = 0;
+  Object.keys(buckets20).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(buckets20[year]);
+    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    aniosTotal20++;
+    if(m.totalReturnPct>0) aniosPositivos20++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivos20 + ' de ' + aniosTotal20);
+
   console.log('\n=== Fin del backtest ===');
 }
 
