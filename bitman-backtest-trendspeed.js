@@ -958,6 +958,90 @@ function simulateConfluenciaSalidaAoAdx(series4H, seriesD, tpPct, leverage, marg
 // capital desde cero (equity=1.0) solo con esas operaciones — así el tramo
 // reservado se evalúa como si fuera un periodo independiente, con su propio
 // drawdown, y no arrastra el resultado acumulado del resto del histórico.
+// Analiza cada operación en detalle: el camino vela a vela de la ganancia
+// flotante (no solo el resultado final), y para las cerradas por TP, una
+// continuación "fantasma" sin TP para ver hasta dónde habrían llegado de
+// verdad si no las hubiéramos cerrado ahí.
+function analizarOperacionesDetallado(series4H, seriesD, verdicts, tpPct, leverage, marginFraction, horasPorVela){
+  const idxD = alignDailyIndex(seriesD, series4H.times);
+  const n = series4H.n;
+  const nocionalFraction = marginFraction * leverage;
+  const operaciones = [];
+
+  // Ganancia flotante (en % de la cuenta, ya con el apalancamiento aplicado,
+  // SIN comisiones — las comisiones solo se cobran al cerrar de verdad) en
+  // un instante dado, dado el precio de entrada y el precio actual.
+  function flotantePct(direction, entryPrice, currentPrice){
+    const raw = direction==='long' ? (currentPrice/entryPrice - 1) : (1 - currentPrice/entryPrice);
+    return marginFraction * raw * leverage * 100;
+  }
+
+  let position=null, entryPrice=null, tpPrice=null, entryIdx=null, path=null;
+
+  const cerrar = (exitPrice, exitIdx, motivo) => {
+    const finalPct = flotantePct(position, entryPrice, exitPrice);
+    const mejor = Math.max(...path, finalPct);
+    const peor = Math.min(...path, finalPct);
+    const positivos = path.filter(p=>p>0).length;
+    operaciones.push({
+      direction: position, entryIdx, exitIdx, motivo,
+      finalPct, mejorPct: mejor, peorPct: peor,
+      fraccionPositiva: path.length ? positivos/path.length : 0,
+      duracionVelas: exitIdx - entryIdx
+    });
+    position=null; entryPrice=null; tpPrice=null; entryIdx=null; path=null;
+  };
+
+  for(let i=1;i<n;i++){
+    const iD = idxD[i];
+    if(position){
+      path.push(flotantePct(position, entryPrice, series4H.closes[i]));
+      const hitTP = position==='long' ? series4H.highs[i] >= tpPrice : series4H.lows[i] <= tpPrice;
+      const forzado = position==='long' && !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
+      const v = verdicts[i];
+      const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
+      if(hitTP) cerrar(tpPrice, i, 'TP');
+      else if(forzado) cerrar(series4H.closes[i], i, 'forzado');
+      else if(!stillValid) cerrar(series4H.closes[i], i, 'veredicto');
+    }
+    if(!position){
+      if(verdicts[i]==='COMPRAR' || verdicts[i]==='VENDER'){
+        position = verdicts[i]==='COMPRAR' ? 'long' : 'short';
+        entryPrice = series4H.closes[i];
+        tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
+        entryIdx = i; path = [];
+      }
+    }
+  }
+  if(position) cerrar(series4H.closes[n-1], n-1, 'fin_datos');
+
+  // Para cada operación cerrada por TP, simula qué habría pasado SIN TP:
+  // continúa desde ahí mismo, misma dirección, hasta que el veredicto
+  // cambie o se fuerce el cierre (usando el histórico real que ya pasó).
+  operaciones.filter(op=>op.motivo==='TP').forEach(op=>{
+    let precioEntradaSombra = series4H.closes[op.entryIdx]; // mismo precio de entrada original
+    let mejorSombra = op.finalPct, i = op.exitIdx;
+    for(i=op.exitIdx; i<n; i++){
+      const pct = flotantePct(op.direction, precioEntradaSombra, series4H.closes[i]);
+      if(pct > mejorSombra) mejorSombra = pct;
+      const forzado = op.direction==='long' && !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
+      const v = verdicts[i];
+      const stillValid = (op.direction==='long' && v==='COMPRAR') || (op.direction==='short' && v==='VENDER');
+      if(forzado || !stillValid) break;
+    }
+    const pctFinalSombra = flotantePct(op.direction, precioEntradaSombra, series4H.closes[Math.min(i,n-1)]);
+    op.sombraSinTP_mejor = mejorSombra;
+    op.sombraSinTP_final = pctFinalSombra;
+    op.habriaMejorado = mejorSombra > op.finalPct;
+  });
+
+  return operaciones;
+}
+
+// Recalcula las métricas para un SUBCONJUNTO de operaciones, componiendo el
+// capital desde cero (equity=1.0) solo con esas operaciones — así el tramo
+// reservado se evalúa como si fuera un periodo independiente, con su propio
+// drawdown, y no arrastra el resultado acumulado del resto del histórico.
 function metricsForTradeSubset(tradeLog){
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
   tradeLog.forEach(t=>{
@@ -1517,6 +1601,60 @@ async function main(){
     const mN = metricsForTradeSubset(bucketsN);
     console.log(pad(String(year),8) + padL(mA.profitFactor.toFixed(2),11) + padL(mN.profitFactor.toFixed(2),11) + padL(fmtPct(mA.totalReturnPct),13) + padL(fmtPct(mN.totalReturnPct),13));
   }
+
+  // ---------- ANÁLISIS Q: qué pasó de verdad dentro de cada operación ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS Q — Análisis detallado del camino de cada operación (TP 3%, 12% capital)');
+  console.log('========================================');
+  console.log('Para cada operación, se sigue el camino vela a vela de la ganancia flotante (no solo');
+  console.log('el resultado final), y para las cerradas por TP, se simula qué habría pasado sin TP.');
+
+  const ops = analizarOperacionesDetallado(s4H, sD, verdicts4H, 3, LEVERAGE, 0.12, 4);
+  console.log('\nTotal de operaciones analizadas: ' + ops.length);
+
+  const cerradasPorTP = ops.filter(o=>o.motivo==='TP');
+  const noTP = ops.filter(o=>o.motivo!=='TP');
+
+  // 1) ¿Cuántas se podrían haber mejorado sin el TP?
+  const mejorables = cerradasPorTP.filter(o=>o.habriaMejorado);
+  console.log('\n--- 1) Operaciones cerradas por TP que habrían llegado más lejos sin él ---');
+  console.log('De ' + cerradasPorTP.length + ' operaciones cerradas por TP: ' + mejorables.length + ' (' + (mejorables.length/cerradasPorTP.length*100).toFixed(1) + '%) habrían alcanzado un punto mejor si hubiéramos dejado correr la operación.');
+  if(mejorables.length){
+    const mejoraMediaPct = mejorables.reduce((a,o)=>a+(o.sombraSinTP_mejor-o.finalPct),0)/mejorables.length;
+    console.log('Mejora media perdida en esos casos: +' + mejoraMediaPct.toFixed(2) + ' puntos porcentuales de cuenta (respecto al TP ya cobrado).');
+  }
+
+  // 2) ¿Cuántas dieron marcha atrás antes de cerrarse (no cortadas a tiempo)?
+  const UMBRAL_MARCHA_ATRAS = 1.0; // punto porcentual de cuenta
+  const noCortadasATiempo = noTP.filter(o => (o.mejorPct - o.finalPct) >= UMBRAL_MARCHA_ATRAS);
+  console.log('\n--- 2) Operaciones (cerradas por veredicto/forzado) que dieron marcha atrás antes de cerrarse ---');
+  console.log('De ' + noTP.length + ' operaciones no cerradas por TP: ' + noCortadasATiempo.length + ' (' + (noCortadasATiempo.length/noTP.length*100).toFixed(1) + '%) tuvieron un momento mejor y luego se deterioraron al menos ' + UMBRAL_MARCHA_ATRAS + ' punto antes del cierre final.');
+  if(noCortadasATiempo.length){
+    const perdidaMedia = noCortadasATiempo.reduce((a,o)=>a+(o.mejorPct-o.finalPct),0)/noCortadasATiempo.length;
+    console.log('Marcha atrás media en esos casos: -' + perdidaMedia.toFixed(2) + ' puntos porcentuales de cuenta (desde el mejor momento hasta el cierre).');
+  }
+
+  // 3) ¿Cuántas apenas estuvieron en positivo?
+  const UMBRAL_APENAS = 0.5; // punto porcentual de cuenta
+  const apenasPositivas = ops.filter(o => o.mejorPct > 0 && o.mejorPct <= UMBRAL_APENAS);
+  console.log('\n--- 3) Operaciones que apenas llegaron a estar en positivo (mejor momento entre 0% y +' + UMBRAL_APENAS + '%) ---');
+  console.log(apenasPositivas.length + ' de ' + ops.length + ' operaciones (' + (apenasPositivas.length/ops.length*100).toFixed(1) + '%) nunca llegaron a desarrollarse de verdad.');
+
+  // 4) ¿Cuántas pasaron la mayor parte de su vida en positivo?
+  const mayorParteEnPositivo = ops.filter(o => o.fraccionPositiva > 0.5);
+  console.log('\n--- 4) Operaciones que pasaron más de la mitad de su vida (vela a vela) con ganancia flotante ---');
+  console.log(mayorParteEnPositivo.length + ' de ' + ops.length + ' operaciones (' + (mayorParteEnPositivo.length/ops.length*100).toFixed(1) + '%).');
+
+  // Resumen cruzado: motivo de cierre x si pasó la mayor parte en positivo
+  console.log('\n--- Resumen cruzado: motivo de cierre ---');
+  console.log(pad('Motivo',12) + padL('Total',8) + padL('Result.+',10) + padL('Mayor parte +',15));
+  ['TP','veredicto','forzado','fin_datos'].forEach(motivo=>{
+    const subset = ops.filter(o=>o.motivo===motivo);
+    if(!subset.length) return;
+    const positivas = subset.filter(o=>o.finalPct>0).length;
+    const mayorParte = subset.filter(o=>o.fraccionPositiva>0.5).length;
+    console.log(pad(motivo,12) + padL(subset.length,8) + padL(positivas+' ('+(positivas/subset.length*100).toFixed(0)+'%)',10) + padL(mayorParte+' ('+(mayorParte/subset.length*100).toFixed(0)+'%)',15));
+  });
 
   console.log('\n=== Fin del backtest ===');
 }
