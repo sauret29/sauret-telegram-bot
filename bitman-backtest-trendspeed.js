@@ -1090,7 +1090,7 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
   }
 
   function cerrarOperacionCompleta(){
-    trades.push({ equityChangePct: (equity/equityAntesEntrada - 1)*100, entryIdx });
+    trades.push({ equityChangePct: (equity/equityAntesEntrada - 1)*100, entryIdx, tocoTP: tpParcialHecho });
     position=null; entryPrice=null; tpPrice=null; entryIdx=null; tpParcialHecho=false; equityAntesEntrada=null;
   }
 
@@ -1866,6 +1866,35 @@ async function main(){
     if(mSin.totalReturnPct>0) aniosPositivosSinBE++;
   });
   console.log('Años con retorno positivo (sin BE): ' + aniosPositivosSinBE + ' de ' + aniosTotalSinBE);
+
+  // ---------- ANÁLISIS U: ganadoras/perdedoras por motivo de cierre (configuración final) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS U — Ganadoras/perdedoras por motivo de cierre (TP parcial 50%, SIN breakeven, 12% capital)');
+  console.log('========================================');
+  console.log('"Con TP" = la operación llegó a tocar el Take Profit parcial en algún momento (aunque el');
+  console.log('resto cerrara después por veredicto). "Sin TP" = se cerró entera por veredicto/forzado, sin');
+  console.log('llegar nunca al TP.');
+
+  function resumenGrupo(trades){
+    const ganadoras = trades.filter(t=>t.equityChangePct>0);
+    const perdedoras = trades.filter(t=>t.equityChangePct<=0);
+    const mediaGan = ganadoras.length ? ganadoras.reduce((a,t)=>a+t.equityChangePct,0)/ganadoras.length : 0;
+    const mediaPer = perdedoras.length ? perdedoras.reduce((a,t)=>a+t.equityChangePct,0)/perdedoras.length : 0;
+    return { total: trades.length, ganadoras: ganadoras.length, perdedoras: perdedoras.length, mediaGan, mediaPer };
+  }
+
+  [
+    {label: SYMBOL, r: rParcialSinBE},
+  ].forEach(({label, r})=>{
+    const conTP = r.tradeLog.filter(t=>t.tocoTP);
+    const sinTP = r.tradeLog.filter(t=>!t.tocoTP);
+    const rConTP = resumenGrupo(conTP);
+    const rSinTP = resumenGrupo(sinTP);
+    console.log('\n--- ' + label + ' — Total operaciones: ' + r.tradeLog.length + ' ---');
+    console.log(pad('Grupo',20) + padL('Total',8) + padL('Ganadoras',11) + padL('% media +',12) + padL('Perdedoras',12) + padL('% media -',12));
+    console.log(pad('Con TP',20) + padL(rConTP.total,8) + padL(rConTP.ganadoras,11) + padL(fmtPct(rConTP.mediaGan),12) + padL(rConTP.perdedoras,12) + padL(fmtPct(rConTP.mediaPer),12));
+    console.log(pad('Sin TP (veredicto)',20) + padL(rSinTP.total,8) + padL(rSinTP.ganadoras,11) + padL(fmtPct(rSinTP.mediaGan),12) + padL(rSinTP.perdedoras,12) + padL(fmtPct(rSinTP.mediaPer),12));
+  });
 
   console.log('\n=== Fin del backtest ===');
 }
