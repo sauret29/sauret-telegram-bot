@@ -1832,6 +1832,41 @@ async function main(){
   });
   console.log('Años con retorno positivo: ' + aniosPositivosParcial + ' de ' + aniosTotalParcial);
 
+  // ---------- ANÁLISIS T: TP parcial SIN breakeven — validación fuera de muestra + walk-forward ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS T — TP parcial (50%, SIN breakeven): validación fuera de muestra + walk-forward');
+  console.log('========================================');
+  console.log('Misma prueba que el Análisis S, pero para la variante SIN protección a breakeven —');
+  console.log('para comparar directamente si la protección compensa o solo recorta ganancias.');
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados ---');
+  const cutoffReservadoSinBE = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntesSinBE = rParcialSinBE.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservadoSinBE);
+  const tradesReservadoSinBE = rParcialSinBE.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservadoSinBE);
+  const mAntesSinBE = metricsForTradeSubset(tradesAntesSinBE);
+  const mReservadoSinBE = metricsForTradeSubset(tradesReservadoSinBE);
+  console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntesSinBE.trades,9) + padL(mAntesSinBE.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesSinBE.totalReturnPct),12) + padL('-'+mAntesSinBE.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesSinBE.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoSinBE.trades,9) + padL(mReservadoSinBE.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoSinBE.totalReturnPct),12) + padL('-'+mReservadoSinBE.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoSinBE.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Walk-forward año por año (comparado con la versión CON breakeven) ---');
+  console.log(pad('Año',8) + padL('Ret SinBE',12) + padL('PF SinBE',10) + padL('DD SinBE',10) + padL('Ret ConBE',12) + padL('PF ConBE',10));
+  const bucketsSinBE = {};
+  rParcialSinBE.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!bucketsSinBE[year]) bucketsSinBE[year] = [];
+    bucketsSinBE[year].push(t);
+  });
+  let aniosPositivosSinBE = 0, aniosTotalSinBE = 0;
+  Object.keys(bucketsSinBE).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const mSin = metricsForTradeSubset(bucketsSinBE[year]);
+    const mCon = metricsForTradeSubset(bucketsParcial[year] || []);
+    console.log(pad(String(year),8) + padL(fmtPct(mSin.totalReturnPct),12) + padL(mSin.profitFactor.toFixed(2),10) + padL('-'+mSin.maxDrawdownPct.toFixed(1)+'%',10) + padL(fmtPct(mCon.totalReturnPct),12) + padL(mCon.profitFactor.toFixed(2),10));
+    aniosTotalSinBE++;
+    if(mSin.totalReturnPct>0) aniosPositivosSinBE++;
+  });
+  console.log('Años con retorno positivo (sin BE): ' + aniosPositivosSinBE + ' de ' + aniosTotalSinBE);
+
   console.log('\n=== Fin del backtest ===');
 }
 
