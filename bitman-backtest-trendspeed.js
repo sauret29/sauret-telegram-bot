@@ -75,6 +75,15 @@ async function fetchCandlesForMonths(interval, months, warmupMargin){
 // MOTOR DEL TREND SPEED ANALYZER (ya construido y probado antes)
 // ============================================================
 
+// Función auxiliar que el motor necesita (máximo móvil sobre 'period' velas)
+function highestPeriod(values,period){
+  const out=new Array(values.length).fill(NaN);
+  for(let i=0;i<values.length;i++){
+    if(i>=period-1) out[i]=Math.max(...values.slice(i-period+1,i+1));
+  }
+  return out;
+}
+
 // ============================================================
 // TREND SPEED ANALYZER [Zeiierman] — motor replicado del Pine
 // ============================================================
