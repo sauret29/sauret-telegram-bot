@@ -38,6 +38,8 @@ const RISK_PCT_INFO = 12;    // solo informativo, se recuerda en el mensaje (val
 // tiene que moverse un 15/5 = 3%.
 const TP_EQUITY_PCT = 15;
 const TP_PCT = TP_EQUITY_PCT / LEVERAGE_INFO; // % de movimiento de PRECIO necesario
+const FRACCION_TP_PARCIAL = 0.5; // al tocar el TP, cierra el 50% y deja correr el resto (sin breakeven — ya validado)
+const MODO_PRUEBA = true; // deja este aviso en cada mensaje mientras se observa el comportamiento en vivo
 
 const STATE_FILE = path.join(__dirname, 'state-confluencia.json');
 
@@ -93,9 +95,11 @@ async function fetchRecentCandles(interval, targetCandles){
 
 function loadState(){
   try{
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if(s.tpParcialHecho === undefined) s.tpParcialHecho = false; // migración desde el formato antiguo (sin TP parcial)
+    return s;
   }catch(e){
-    return { position: null, entryPrice: null, tpPrice: null, entryTime: null };
+    return { position: null, entryPrice: null, tpPrice: null, entryTime: null, tpParcialHecho: false };
   }
 }
 function saveState(state){
@@ -532,41 +536,64 @@ function verdictoActual(s4h, sD){
 
 // Procesa un "tick" (una comprobación): dado el veredicto actual y el estado
 // previo, decide qué mensajes hay que mandar y cómo queda el nuevo estado.
-// Separada de main() para poder probarla con datos de control, sin red ni
-// sistema de archivos de por medio.
+// Implementa la configuración FINAL validada: al tocar el TP, cierra el 50%
+// y deja correr el resto (sin breakeven) hasta cambio de veredicto o cierre
+// forzado. Separada de main() para poder probarla con datos de control.
 function processTick(s4h, actual, state){
   const messages = [];
   const newState = Object.assign({}, state);
+  const banner = MODO_PRUEBA ? '🧪 <i>MODO PRUEBA</i>\n' : '';
 
   if(newState.position){
     const last = s4h.n - 1;
-    const hitTP = newState.position==='long'
-      ? s4h.highs[last] >= newState.tpPrice
-      : s4h.lows[last] <= newState.tpPrice;
 
-    if(hitTP){
-      const gananciaPct = newState.position==='long'
-        ? ((newState.tpPrice/newState.entryPrice - 1) * 100)
-        : ((1 - newState.tpPrice/newState.entryPrice) * 100);
-      messages.push(
-        '🎯 <b>Take Profit alcanzado</b> (' + (newState.position==='long'?'largo':'corto') + ')\n' +
-        'Entrada: ' + newState.entryPrice.toFixed(2) + ' → TP: ' + newState.tpPrice.toFixed(2) +
-        ' (precio ' + (gananciaPct>=0?'+':'') + gananciaPct.toFixed(2) + '% · posición ' + (gananciaPct>=0?'+':'') + (gananciaPct*LEVERAGE_INFO).toFixed(1) + '% con x' + LEVERAGE_INFO + ')'
-      );
-      newState.position = null; newState.entryPrice = null; newState.tpPrice = null; newState.entryTime = null;
+    if(!newState.tpParcialHecho){
+      // Fase 1: todavía no se ha tocado el TP parcial.
+      const hitTP = newState.position==='long'
+        ? s4h.highs[last] >= newState.tpPrice
+        : s4h.lows[last] <= newState.tpPrice;
+
+      if(hitTP){
+        const gananciaPct = newState.position==='long'
+          ? ((newState.tpPrice/newState.entryPrice - 1) * 100)
+          : ((1 - newState.tpPrice/newState.entryPrice) * 100);
+        messages.push(
+          banner + '🎯 <b>TP parcial alcanzado (' + (FRACCION_TP_PARCIAL*100) + '%)</b> (' + (newState.position==='long'?'largo':'corto') + ')\n' +
+          'Se cierra la mitad de la posición en ' + newState.tpPrice.toFixed(2) +
+          ' (precio ' + (gananciaPct>=0?'+':'') + gananciaPct.toFixed(2) + '% · posición ' + (gananciaPct>=0?'+':'') + (gananciaPct*LEVERAGE_INFO).toFixed(1) + '% con x' + LEVERAGE_INFO + ')\n' +
+          '<i>El resto sigue abierto, sin nuevo TP — se cierra por cambio de veredicto o cierre forzado.</i>'
+        );
+        newState.tpParcialHecho = true;
+      } else {
+        const stillValid = (newState.position==='long' && actual.verdict==='COMPRAR') || (newState.position==='short' && actual.verdict==='VENDER');
+        if(!stillValid){
+          const gananciaPct = newState.position==='long'
+            ? ((actual.price/newState.entryPrice - 1) * 100)
+            : ((1 - actual.price/newState.entryPrice) * 100);
+          messages.push(
+            banner + '🔻 <b>Cierre completo (100%), sin haber tocado TP</b> (' + (newState.position==='long'?'largo':'corto') + ')\n' +
+            'Entrada: ' + newState.entryPrice.toFixed(2) + ' → Cierre: ' + actual.price.toFixed(2) +
+            ' (' + (gananciaPct>=0?'+':'') + gananciaPct.toFixed(2) + '% de precio, x' + LEVERAGE_INFO + ' apalancamiento)\n' +
+            escapeHtml(actual.forced ? 'Cierre forzado: ' + actual.motivo : actual.motivo)
+          );
+          newState.position = null; newState.entryPrice = null; newState.tpPrice = null; newState.entryTime = null; newState.tpParcialHecho = false;
+        }
+      }
     } else {
+      // Fase 2: ya se cobró el TP parcial — el resto corre sin más TP,
+      // sin breakeven (ya validado que no aporta nada entre BTC y ETH).
       const stillValid = (newState.position==='long' && actual.verdict==='COMPRAR') || (newState.position==='short' && actual.verdict==='VENDER');
       if(!stillValid){
         const gananciaPct = newState.position==='long'
           ? ((actual.price/newState.entryPrice - 1) * 100)
           : ((1 - actual.price/newState.entryPrice) * 100);
         messages.push(
-          '🔻 <b>Cierre por cambio de veredicto</b> (' + (newState.position==='long'?'largo':'corto') + ')\n' +
+          banner + '🔻 <b>Cierre del resto (' + ((1-FRACCION_TP_PARCIAL)*100) + '% restante)</b> (' + (newState.position==='long'?'largo':'corto') + ')\n' +
           'Entrada: ' + newState.entryPrice.toFixed(2) + ' → Cierre: ' + actual.price.toFixed(2) +
           ' (' + (gananciaPct>=0?'+':'') + gananciaPct.toFixed(2) + '% de precio, x' + LEVERAGE_INFO + ' apalancamiento)\n' +
           escapeHtml(actual.forced ? 'Cierre forzado: ' + actual.motivo : actual.motivo)
         );
-        newState.position = null; newState.entryPrice = null; newState.tpPrice = null; newState.entryTime = null;
+        newState.position = null; newState.entryPrice = null; newState.tpPrice = null; newState.entryTime = null; newState.tpParcialHecho = false;
       }
     }
   }
@@ -576,12 +603,12 @@ function processTick(s4h, actual, state){
       const direction = actual.verdict==='COMPRAR' ? 'long' : 'short';
       const tpPrice = direction==='long' ? actual.price*(1+TP_PCT/100) : actual.price*(1-TP_PCT/100);
       messages.push(
-        (direction==='long' ? '🟢' : '🔴') + ' <b>Nueva entrada: ' + (direction==='long'?'LARGO':'CORTO') + '</b>\n' +
-        'Precio: ' + actual.price.toFixed(2) + ' · TP: ' + tpPrice.toFixed(2) + ' (precio +' + TP_PCT.toFixed(1) + '% · posición +' + TP_EQUITY_PCT + '% con x' + LEVERAGE_INFO + ')\n' +
+        banner + (direction==='long' ? '🟢' : '🔴') + ' <b>Nueva entrada: ' + (direction==='long'?'LARGO':'CORTO') + '</b>\n' +
+        'Precio: ' + actual.price.toFixed(2) + ' · TP parcial (' + (FRACCION_TP_PARCIAL*100) + '%): ' + tpPrice.toFixed(2) + ' (precio +' + TP_PCT.toFixed(1) + '% · posición +' + TP_EQUITY_PCT + '% con x' + LEVERAGE_INFO + ')\n' +
         escapeHtml(actual.forced ? 'Entrada forzada solo por Koncorde (sin la confirmación habitual de AO+ADX+4H/Diario): ' + actual.motivo : actual.motivo) + '\n' +
-        '<i>Recordatorio de gestión: ' + RISK_PCT_INFO + '% del capital, x' + LEVERAGE_INFO + '. Sin stop loss — cierra por TP o por cambio de veredicto.</i>'
+        '<i>Recordatorio de gestión: ' + RISK_PCT_INFO + '% del capital, x' + LEVERAGE_INFO + '. Sin stop loss. Al llegar al TP se cierra el ' + (FRACCION_TP_PARCIAL*100) + '% y el resto sigue corriendo sin protección adicional.</i>'
       );
-      newState.position = direction; newState.entryPrice = actual.price; newState.tpPrice = tpPrice; newState.entryTime = actual.time;
+      newState.position = direction; newState.entryPrice = actual.price; newState.tpPrice = tpPrice; newState.entryTime = actual.time; newState.tpParcialHecho = false;
     }
   }
 
