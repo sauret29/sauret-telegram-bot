@@ -1930,17 +1930,28 @@ async function main(){
 
   // ---------- ANÁLISIS W: barrido del reparto del TP parcial, sin apalancamiento ----------
   console.log('\n\n========================================');
-  console.log('ANÁLISIS W — Barrido del reparto del TP parcial (1x, sin apalancamiento, 12% capital)');
+  console.log('ANÁLISIS W — Barrido del reparto del TP parcial: 1x vs 5x, mismo 12% de capital');
   console.log('========================================');
-  console.log('¿Es 50/50 realmente el mejor reparto, o hay una fracción distinta que funcione mejor');
-  console.log('ahora que no hay apalancamiento amplificando ni penalizando la elección?');
+  console.log('¿Es el mismo reparto óptimo con o sin apalancamiento? El apalancamiento amplifica');
+  console.log('igual de fuerte el tramo sin proteger hacia arriba que hacia abajo, así que no puede');
+  console.log('darse por hecho que el mejor punto se mantenga igual.');
 
-  console.log('\n' + pad('% cerrado en TP',18) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10) + padL('Ret/DD',9));
+  console.log('\n--- Con 1x (sin apalancamiento) ---');
+  console.log(pad('% cerrado en TP',18) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10) + padL('Ret/DD',9));
   [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80].forEach(fraccion=>{
     const r = simulateConfluenciaTPParcial(s4H, sD, 3, 1, 0.12, 4, fraccion, false);
     const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
-    console.log(pad((fraccion*100)+'%',18) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10) + padL(retDD.toFixed(2),9));
+    console.log(pad((fraccion*100)+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10) + padL(retDD.toFixed(2),9));
   });
+
+  console.log('\n--- Con 5x (el apalancamiento real del bot) ---');
+  console.log(pad('% cerrado en TP',18) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10) + padL('Ret/DD',9));
+  [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80].forEach(fraccion=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, 5, 0.12, 4, fraccion, false);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad((fraccion*100)+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10) + padL(retDD.toFixed(2),9));
+  });
+
 
   console.log('\n=== Fin del backtest ===');
 }
