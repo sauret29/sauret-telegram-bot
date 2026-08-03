@@ -1,15 +1,15 @@
-name: Bitman Confluencia Live
+name: El Cauto Temerario Live
 
 "on":
   schedule:
-    - cron: '*/15 * * * *'   # cada 15 minutos, igual que el bot original
+    - cron: '*/15 * * * *'   # cada 15 minutos
   workflow_dispatch:          # permite pulsar "Run workflow" para probarlo a mano
 
 permissions:
-  contents: write            # necesario para guardar el estado (state-confluencia.json)
+  contents: write            # necesario para guardar el estado (state-cauto-temerario.json)
 
 jobs:
-  check-confluencia:
+  check-cauto-temerario:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar el repositorio
@@ -25,15 +25,15 @@ jobs:
           SYMBOL: 'BTCUSDT'
           TELEGRAM_BOT_TOKEN: ${{ secrets.CONFLUENCIA_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.CONFLUENCIA_CHAT_ID }}
-        run: 
+        run: node bitman-cauto-temerario-live.js
 
       - name: Guardar el estado actualizado
-        run: node bitman-cauto-temerario-live.j
-          git config user.name "bitman-confluencia-bot"
-          git config user.email "bitman-confluencia-bot@users.noreply.github.com"
-          git add state-confluencia.json
+        run: |
+          git config user.name "cauto-temerario-bot"
+          git config user.email "cauto-temerario-bot@users.noreply.github.com"
+          git add state-cauto-temerario.json
           git diff --staged --quiet && exit 0
-          git commit -m "Actualizar estado Confluencia [skip ci]"
+          git commit -m "Actualizar estado Cauto Temerario [skip ci]"
           for i in 1 2 3 4 5; do
             git pull --rebase origin main && git push && exit 0
             echo "Intento $i: choque con otro commit, reintentando en unos segundos..."
