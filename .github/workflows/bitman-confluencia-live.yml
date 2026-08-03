@@ -25,10 +25,10 @@ jobs:
           SYMBOL: 'BTCUSDT'
           TELEGRAM_BOT_TOKEN: ${{ secrets.CONFLUENCIA_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.CONFLUENCIA_CHAT_ID }}
-        run: node bitman-confluencia-live.js
+        run: 
 
       - name: Guardar el estado actualizado
-        run: |
+        run: node bitman-cauto-temerario-live.j
           git config user.name "bitman-confluencia-bot"
           git config user.email "bitman-confluencia-bot@users.noreply.github.com"
           git add state-confluencia.json
