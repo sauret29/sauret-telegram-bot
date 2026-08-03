@@ -2054,6 +2054,30 @@ async function main(){
     console.log(pad(key,16) + padL(grupo.length,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mediaEquity),15) + padL(m.profitFactor.toFixed(2),10));
   });
 
+  // ---------- ANÁLISIS Z: BBWP y cambios de AO por año — ¿2021/2023 se ven distintos? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS Z — BBWP y cambios de AO medios por año calendario (¿2021/2023 destacan?)');
+  console.log('========================================');
+  console.log('Mismas dos métricas del Análisis Y, pero agrupadas por año en vez de mezcladas —');
+  console.log('para ver si los años malos (2021, 2023) tienen un perfil de BBWP/cambios de AO');
+  console.log('distinto al de los años buenos.');
+
+  const gruposPorAnio = {};
+  operacionesConContexto.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!gruposPorAnio[year]) gruposPorAnio[year] = [];
+    gruposPorAnio[year].push(t);
+  });
+
+  console.log('\n' + pad('Año',8) + padL('Operac.',9) + padL('BBWP medio',12) + padL('Cambios AO medio',18) + padL('Retorno año',13) + padL('P.Factor año',13));
+  Object.keys(gruposPorAnio).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const grupo = gruposPorAnio[year];
+    const bbwpMedio = grupo.reduce((a,t)=>a+t.bbwpEntrada,0)/grupo.length;
+    const cambiosMedio = grupo.reduce((a,t)=>a+t.cambiosAO,0)/grupo.length;
+    const m = metricsForTradeSubset(grupo);
+    console.log(pad(String(year),8) + padL(grupo.length,9) + padL(bbwpMedio.toFixed(1),12) + padL(cambiosMedio.toFixed(2),18) + padL(fmtPct(m.totalReturnPct),13) + padL(m.profitFactor.toFixed(2),13));
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
