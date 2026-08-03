@@ -8,11 +8,11 @@ name: Bitman Backtest (manual)
         required: true
         default: 'BTCUSDT'
       meses:
-        description: 'Meses de histórico a analizar (Binance solo tiene BTCUSDT desde 2017)'
+        description: 'Meses de histórico a analizar'
         required: true
         default: '6'
       meses_reservados:
-        description: 'Meses recientes a reservar para validación fuera de muestra (Análisis H)'
+        description: 'Meses recientes a reservar para validación fuera de muestra'
         required: true
         default: '12'
 
@@ -33,4 +33,4 @@ jobs:
           SYMBOL: ${{ github.event.inputs.simbolo }}
           MESES_HISTORICO: ${{ github.event.inputs.meses }}
           MESES_RESERVADOS: ${{ github.event.inputs.meses_reservados }}
-        run: node bitman-backtest.js
+        run: node backtests/bitman-backtest.js
