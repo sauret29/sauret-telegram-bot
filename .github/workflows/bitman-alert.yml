@@ -1,25 +1,20 @@
 name: Bitman Telegram Alert
-
 "on":
   schedule:
     - cron: '*/15 * * * *'   # cada 15 minutos (mínimo permitido por GitHub Actions: 5 min)
   workflow_dispatch:          # permite pulsar "Run workflow" en la pestaña Actions para probarlo a mano
-
 permissions:
   contents: write            # necesario para poder guardar el estado (state.json) en el repo
-
 jobs:
   check-signals:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar el repositorio
         uses: actions/checkout@v4
-
       - name: Preparar Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
       - name: Comprobar señales y avisar si algo cambió
         env:
           SYMBOL: 'BTCUSDT'
@@ -29,12 +24,11 @@ jobs:
           REINFORCED_DAILY_GATE: 'false'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: 
-
-      - name: Guardar el estado actualizado (para saber qué cambió la próxima vez)
         run: node bots-en-vivo/bitman-telegram-bot.js
+      - name: Guardar el estado actualizado (para saber qué cambió la próxima vez)
+        run: |
           git config user.name "bitman-bot"
           git config user.email "bitman-bot@users.noreply.github.com"
-          git add state.json
+          git add bots-en-vivo/state.json
           git diff --staged --quiet || git commit -m "Actualizar estado de señales [skip ci]"
           git push
