@@ -1061,6 +1061,19 @@ function metricsForTradeSubset(tradeLog){
   };
 }
 
+// Cuenta cuántas veces cambió el estado del AO (Alcista/Bajista/Retroceso...)
+// en las últimas 'ventana' velas antes (e incluyendo) el índice i — una
+// medida directa de "cuántos bandazos está dando el indicador" justo antes
+// de esa entrada. Muchos cambios = indicador indeciso/errático.
+function contarCambiosAO(series, i, ventana){
+  let cambios = 0;
+  const desde = Math.max(1, i - ventana + 1);
+  for(let k=desde; k<=i; k++){
+    if(series.aoState[k] !== series.aoState[k-1]) cambios++;
+  }
+  return cambios;
+}
+
 // Confluencia en 4H con TAKE PROFIT PARCIAL: al tocar el TP (3% de precio),
 // cierra solo una FRACCIÓN de la posición (fraccionCierre) y deja correr el
 // resto con las reglas de salida normales (cambio de veredicto / cierre
@@ -1927,6 +1940,119 @@ async function main(){
     if(m.totalReturnPct>0) aniosPositivosSinApalancamiento++;
   });
   console.log('Años con retorno positivo: ' + aniosPositivosSinApalancamiento + ' de ' + aniosTotalSinApalancamiento);
+
+  // ---------- ANÁLISIS W: barrido del reparto del TP parcial, sin apalancamiento ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS W — Barrido del reparto del TP parcial: 1x vs 5x, mismo 12% de capital');
+  console.log('========================================');
+  console.log('¿Es el mismo reparto óptimo con o sin apalancamiento? El apalancamiento amplifica');
+  console.log('igual de fuerte el tramo sin proteger hacia arriba que hacia abajo, así que no puede');
+  console.log('darse por hecho que el mejor punto se mantenga igual.');
+
+  console.log('\n--- Con 1x (sin apalancamiento) ---');
+  console.log(pad('% cerrado en TP',18) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10) + padL('Ret/DD',9));
+  [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80].forEach(fraccion=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, 1, 0.12, 4, fraccion, false);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad((fraccion*100)+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10) + padL(retDD.toFixed(2),9));
+  });
+
+  console.log('\n--- Con 5x (el apalancamiento real del bot) ---');
+  console.log(pad('% cerrado en TP',18) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10) + padL('Ret/DD',9));
+  [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80].forEach(fraccion=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, 5, 0.12, 4, fraccion, false);
+    const retDD = r.maxDrawdownPct>0 ? (r.totalReturnPct/r.maxDrawdownPct) : (r.totalReturnPct>0?Infinity:0);
+    console.log(pad((fraccion*100)+'%',18) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10) + padL(retDD.toFixed(2),9));
+  });
+
+
+  // ---------- ANÁLISIS X: TP parcial 20% (con 5x): validación fuera de muestra + walk-forward ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS X — TP parcial 20% (con 5x, sin breakeven): validación fuera de muestra + walk-forward');
+  console.log('========================================');
+  console.log('Misma prueba que el Análisis S/T, pero para el nuevo reparto 20/80 encontrado en el');
+  console.log('Análisis W como el mejor punto de drawdown con el apalancamiento real (5x).');
+
+  const rParcial20 = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+
+  console.log('\n--- Comparación directa con el 50/50 actual (12% capital, 5x) ---');
+  console.log(pad('Variante',18) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('20/80 (nuevo)',18) + padL(rParcial20.trades,9) + padL(rParcial20.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rParcial20.totalReturnPct),12) + padL('-'+rParcial20.maxDrawdownPct.toFixed(1)+'%',11) + padL(rParcial20.profitFactor.toFixed(2),10));
+  console.log(pad('50/50 (actual)',18) + padL(rParcialSinBE.trades,9) + padL(rParcialSinBE.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rParcialSinBE.totalReturnPct),12) + padL('-'+rParcialSinBE.maxDrawdownPct.toFixed(1)+'%',11) + padL(rParcialSinBE.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados ---');
+  const cutoffReservado20 = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntes20 = rParcial20.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservado20);
+  const tradesReservado20 = rParcial20.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservado20);
+  const mAntes20 = metricsForTradeSubset(tradesAntes20);
+  const mReservado20 = metricsForTradeSubset(tradesReservado20);
+  console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntes20.trades,9) + padL(mAntes20.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntes20.totalReturnPct),12) + padL('-'+mAntes20.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntes20.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservado20.trades,9) + padL(mReservado20.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservado20.totalReturnPct),12) + padL('-'+mReservado20.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservado20.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Walk-forward año por año ---');
+  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const buckets20 = {};
+  rParcial20.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!buckets20[year]) buckets20[year] = [];
+    buckets20[year].push(t);
+  });
+  let aniosPositivos20 = 0, aniosTotal20 = 0;
+  Object.keys(buckets20).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(buckets20[year]);
+    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    aniosTotal20++;
+    if(m.totalReturnPct>0) aniosPositivos20++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivos20 + ' de ' + aniosTotal20);
+
+  // ---------- ANÁLISIS Y: ¿hay zonas donde habría sido mejor no operar? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS Y — Diagnóstico: ¿la falta de volatilidad o los cambios bruscos del AO predicen malas operaciones?');
+  console.log('========================================');
+  console.log('Para cada operación de la configuración 20/80 (5x, 12% capital), se mira el BBWP');
+  console.log('(volatilidad comprimida = valor bajo) y el número de cambios de estado del AO en las');
+  console.log('últimas 12 velas (48h) justo antes de entrar — y se agrupan las operaciones por esos');
+  console.log('valores para ver si hay un patrón con el resultado.');
+
+  const rDiagnostico = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  const operacionesConContexto = rDiagnostico.tradeLog.map(t=>({
+    ...t,
+    bbwpEntrada: s4H.bbwp[t.entryIdx],
+    cambiosAO: contarCambiosAO(s4H, t.entryIdx, 12)
+  })).filter(t=>!isNaN(t.bbwpEntrada));
+
+  console.log('\n--- Por BBWP en el momento de entrar (cuartiles: volatilidad comprimida → expandida) ---');
+  const bbwpOrdenado = [...operacionesConContexto].sort((a,b)=>a.bbwpEntrada-b.bbwpEntrada);
+  const tamCuartil = Math.floor(bbwpOrdenado.length/4);
+  console.log(pad('Cuartil BBWP',16) + padL('Rango',16) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno medio',15) + padL('P.Factor',10));
+  for(let q=0;q<4;q++){
+    const desde = q*tamCuartil, hasta = (q===3) ? bbwpOrdenado.length : (q+1)*tamCuartil;
+    const grupo = bbwpOrdenado.slice(desde,hasta);
+    if(!grupo.length) continue;
+    const m = metricsForTradeSubset(grupo);
+    const mediaEquity = grupo.reduce((a,t)=>a+t.equityChangePct,0)/grupo.length;
+    const rango = grupo[0].bbwpEntrada.toFixed(0) + '-' + grupo[grupo.length-1].bbwpEntrada.toFixed(0);
+    console.log(pad('Q'+(q+1),16) + padL(rango,16) + padL(grupo.length,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mediaEquity),15) + padL(m.profitFactor.toFixed(2),10));
+  }
+
+  console.log('\n--- Por número de cambios de estado del AO en las 12 velas previas (0 = muy estable, más = más errático) ---');
+  const gruposCambios = {'0-1':[], '2-3':[], '4-5':[], '6+':[]};
+  operacionesConContexto.forEach(t=>{
+    if(t.cambiosAO<=1) gruposCambios['0-1'].push(t);
+    else if(t.cambiosAO<=3) gruposCambios['2-3'].push(t);
+    else if(t.cambiosAO<=5) gruposCambios['4-5'].push(t);
+    else gruposCambios['6+'].push(t);
+  });
+  console.log(pad('Cambios AO',16) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno medio',15) + padL('P.Factor',10));
+  Object.keys(gruposCambios).forEach(key=>{
+    const grupo = gruposCambios[key];
+    if(!grupo.length) return;
+    const m = metricsForTradeSubset(grupo);
+    const mediaEquity = grupo.reduce((a,t)=>a+t.equityChangePct,0)/grupo.length;
+    console.log(pad(key,16) + padL(grupo.length,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mediaEquity),15) + padL(m.profitFactor.toFixed(2),10));
+  });
 
   console.log('\n=== Fin del backtest ===');
 }
