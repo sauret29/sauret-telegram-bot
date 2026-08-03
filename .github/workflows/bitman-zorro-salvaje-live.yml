@@ -1,0 +1,43 @@
+name: El Zorro Salvaje Live
+
+"on":
+  schedule:
+    - cron: '*/15 * * * *'   # cada 15 minutos, igual que los demás bots
+  workflow_dispatch:          # permite pulsar "Run workflow" para probarlo a mano
+
+permissions:
+  contents: write            # necesario para guardar el estado (state-zorro-salvaje.json)
+
+jobs:
+  check-zorro-salvaje:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Comprobar señal y avisar si algo cambió
+        env:
+          SYMBOL: 'BTCUSDT'
+          TELEGRAM_BOT_TOKEN: ${{ secrets.ZORRO_SALVAJE_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.ZORRO_SALVAJE_CHAT_ID }}
+        run: node bitman-zorro-salvaje-live.js
+
+      - name: Guardar el estado actualizado
+        run: |
+          git config user.name "zorro-salvaje-bot"
+          git config user.email "zorro-salvaje-bot@users.noreply.github.com"
+          git add state-zorro-salvaje.json
+          git diff --staged --quiet && exit 0
+          git commit -m "Actualizar estado Zorro Salvaje [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin main && git push && exit 0
+            echo "Intento $i: choque con otro commit, reintentando en unos segundos..."
+            sleep $((RANDOM % 10 + 5))
+          done
+          echo "No se pudo subir el estado tras varios intentos."
+          exit 1
