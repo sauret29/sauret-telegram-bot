@@ -1,4 +1,4 @@
-name: Bitman Backtest Trend Speed (manual)
+name: Bitman Backtest (manual)
 
 "on":
   workflow_dispatch:
@@ -8,16 +8,16 @@ name: Bitman Backtest Trend Speed (manual)
         required: true
         default: 'BTCUSDT'
       meses:
-        description: 'Meses de historico a analizar'
+        description: 'Meses de histórico a analizar'
         required: true
         default: '6'
       meses_reservados:
-        description: 'Meses recientes a reservar para validacion fuera de muestra'
+        description: 'Meses recientes a reservar para validación fuera de muestra'
         required: true
         default: '12'
 
 jobs:
-  run-backtest-trendspeed:
+  run-backtest:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar el repositorio
@@ -28,9 +28,9 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Ejecutar backtest Trend Speed (tres temporalidades, puede tardar varios minutos)
+      - name: Ejecutar backtest (puede tardar varios minutos con periodos largos)
         env:
           SYMBOL: ${{ github.event.inputs.simbolo }}
           MESES_HISTORICO: ${{ github.event.inputs.meses }}
           MESES_RESERVADOS: ${{ github.event.inputs.meses_reservados }}
-        run: node bitman-backtest-trendspeed.js
+        run: node backtests/bitman-backtest.js
