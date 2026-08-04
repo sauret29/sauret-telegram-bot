@@ -1295,11 +1295,11 @@ function velasLlevaCumplida(getCondicion, i){
 // cierra si el precio vuelve al precio de entrada (breakeven), para que la
 // operación completa nunca pueda terminar en negativo tras haber cobrado
 // la parte parcial.
-function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela, fraccionCierre, protegerBreakeven, filtroEntradaExtra, slPct){
+function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela, fraccionCierre, protegerBreakeven, filtroEntradaExtra, slPct, trailPct){
   const idxD = alignDailyIndex(seriesD, series4H.times);
   const n = series4H.n;
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
-  let position=null, entryPrice=null, tpPrice=null, slPrice=null, entryIdx=null, tpParcialHecho=false, fraccionRestante=null, ultimoCierreIdx=null, equityAntesEntrada=null;
+  let position=null, entryPrice=null, tpPrice=null, slPrice=null, mejorPrecioFavorable=null, entryIdx=null, tpParcialHecho=false, fraccionRestante=null, ultimoCierreIdx=null, equityAntesEntrada=null;
   const trades = [];
   const nocionalFraction = marginFraction * leverage;
 
@@ -1324,15 +1324,21 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
   for(let i=1;i<n;i++){
     const iD = idxD[i];
     if(position){
+      let trailStopPrice = null, hitTrail = false;
+      if(trailPct!=null){
+        mejorPrecioFavorable = position==='long' ? Math.max(mejorPrecioFavorable, series4H.highs[i]) : Math.min(mejorPrecioFavorable, series4H.lows[i]);
+        trailStopPrice = position==='long' ? mejorPrecioFavorable*(1-trailPct/100) : mejorPrecioFavorable*(1+trailPct/100);
+        hitTrail = position==='long' ? series4H.lows[i] <= trailStopPrice : series4H.highs[i] >= trailStopPrice;
+      }
       if(!tpParcialHecho){
         const hitSL = slPct!=null && (position==='long' ? series4H.lows[i] <= slPrice : series4H.highs[i] >= slPrice);
         const hitTP = position==='long' ? series4H.highs[i] >= tpPrice : series4H.lows[i] <= tpPrice;
         const forzado = position==='long' && !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
         const v = verdicts4H_local(series4H, seriesD, i, iD);
         const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
-        if(hitSL){
-          // El SL tiene prioridad si ambos (SL y TP) ocurrieran en la misma vela — criterio conservador.
-          cerrarFraccion(1.0, slPrice, BITGET_TAKER_FEE_PCT, i, entryIdx);
+        if(hitSL || hitTrail){
+          // El SL/trailing tiene prioridad si coincidiera con el TP en la misma vela — criterio conservador.
+          cerrarFraccion(1.0, hitTrail ? trailStopPrice : slPrice, BITGET_TAKER_FEE_PCT, i, entryIdx);
           cerrarOperacionCompleta(i);
         } else if(hitTP){
           // Cierra la fracción indicada al precio del TP, deja correr el resto.
@@ -1344,14 +1350,14 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
         }
       } else {
         // Ya se cobró la parte parcial — el resto corre con las reglas normales
-        // (y opcionalmente breakeven, y opcionalmente SL) hasta su propio cierre.
+        // (y opcionalmente breakeven, y opcionalmente SL/trailing) hasta su propio cierre.
         const hitSLResto = slPct!=null && (position==='long' ? series4H.lows[i] <= slPrice : series4H.highs[i] >= slPrice);
         const forzado = position==='long' && !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
         const v = verdicts4H_local(series4H, seriesD, i, iD);
         const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
         const hitBreakeven = protegerBreakeven && (position==='long' ? series4H.lows[i] <= entryPrice : series4H.highs[i] >= entryPrice);
-        if(hitSLResto){
-          cerrarFraccion(fraccionRestante, slPrice, BITGET_TAKER_FEE_PCT, i, ultimoCierreIdx);
+        if(hitSLResto || hitTrail){
+          cerrarFraccion(fraccionRestante, hitTrail ? trailStopPrice : slPrice, BITGET_TAKER_FEE_PCT, i, ultimoCierreIdx);
           cerrarOperacionCompleta(i);
         } else if(hitBreakeven){
           cerrarFraccion(fraccionRestante, entryPrice, BITGET_TAKER_FEE_PCT, i, ultimoCierreIdx);
@@ -1372,6 +1378,7 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
           entryPrice = series4H.closes[i];
           tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
           slPrice = slPct!=null ? (position==='long' ? entryPrice*(1-slPct/100) : entryPrice*(1+slPct/100)) : null;
+          mejorPrecioFavorable = trailPct!=null ? entryPrice : null;
           entryIdx = i; tpParcialHecho=false; equityAntesEntrada=equity;
           const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
           equity *= Math.max(0, 1 - comisionEntradaPct/100);
@@ -2959,6 +2966,36 @@ async function main(){
   });
   console.log('\nDe esas ' + cerradasPorVeredicto.length + ' operaciones, ' + conPuntoMejor + ' (' + (conPuntoMejor/cerradasPorVeredicto.length*100).toFixed(1) + '%) tuvieron un punto anterior mejor que el cierre final.');
   console.log('Mejora media perdida en esos casos: +' + (sumaMejoraPerdida/conPuntoMejor).toFixed(2) + ' puntos porcentuales de cuenta (respecto al cierre real por veredicto).');
+
+  // ---------- ANÁLISIS AQ: barrido de TRAILING STOP sobre la 20/80 real (a diferencia del SL fijo del AO) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AQ — Barrido de Trailing Stop sobre la 20/80 real (solo se mueve a favor, nunca cierra por un simple vaivén)');
+  console.log('========================================');
+  console.log('A diferencia del SL fijo (Análisis AO, que empeoró todo), el trailing solo se activa cuando el precio');
+  console.log('retrocede DESDE SU MEJOR PUNTO — no desde la entrada. Debería sufrir menos el efecto sierra de reentradas.');
+
+  console.log('\n' + pad('Trailing',10) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const rSinTrailAQ = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  console.log(pad('(sin, actual)',10) + padL(rSinTrailAQ.trades,9) + padL(rSinTrailAQ.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSinTrailAQ.totalReturnPct),12) + padL('-'+rSinTrailAQ.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSinTrailAQ.profitFactor.toFixed(2),10));
+  const resultadosTrail = {};
+  [1, 1.5, 2, 2.5, 3, 4, 5, 7, 10].forEach(trailPct=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, undefined, undefined, trailPct);
+    resultadosTrail[trailPct] = r;
+    console.log(pad('-'+trailPct+'%',10) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
+  });
+
+  console.log('\n--- Efecto específico en 2021 (el año más golpeado por movimientos violentos) ---');
+  console.log(pad('Trailing',10) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  function metricasAnioTrail(tradeLog, year){
+    const subset = tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear()===year);
+    return metricsForTradeSubset(subset);
+  }
+  const m2021SinTrail = metricasAnioTrail(rSinTrailAQ.tradeLog, 2021);
+  console.log(pad('(sin)',10) + padL(m2021SinTrail.trades,9) + padL(fmtPct(m2021SinTrail.totalReturnPct),12) + padL('-'+m2021SinTrail.maxDrawdownPct.toFixed(1)+'%',11) + padL(m2021SinTrail.profitFactor.toFixed(2),10));
+  [1, 1.5, 2, 2.5, 3, 4, 5, 7, 10].forEach(trailPct=>{
+    const m = metricasAnioTrail(resultadosTrail[trailPct].tradeLog, 2021);
+    console.log(pad('-'+trailPct+'%',10) + padL(m.trades,9) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+  });
 
   console.log('\n=== Fin del backtest ===');
 }
