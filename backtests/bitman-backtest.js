@@ -271,6 +271,83 @@ function stochasticSmoothed(source,highs,lows,period,smoothPeriod){
   }
   return sma(k,smoothPeriod);
 }
+/* =========================================================
+   UTILIDADES DE MEDIAS MÓVILES (para el Trend Speed Analyzer)
+========================================================= */
+// RMA de Wilder como función independiente (réplica de ta.rma de Pine):
+// semilla = media simple de los primeros 'period' valores, después
+// suavizado exponencial con peso 1/period.
+function rmaSeries(values, period){
+  const n = values.length;
+  const out = new Array(n).fill(NaN);
+  let sum = 0;
+  for(let i=0;i<n;i++){
+    if(i<period-1){ sum += values[i]; continue; }
+    if(i===period-1){ sum += values[i]; out[i] = sum/period; continue; }
+    if(isNaN(out[i-1])) continue;
+    out[i] = (out[i-1]*(period-1) + values[i]) / period;
+  }
+  return out;
+}
+
+// Media móvil ponderada (réplica de ta.wma): el peso crece linealmente
+// hacia la vela más reciente. Si alguna vela de la ventana es NaN, el
+// resultado de esa vela también es NaN (mismo criterio que Pine).
+function wmaSeries(values, period){
+  const n = values.length;
+  const out = new Array(n).fill(NaN);
+  const denom = period*(period+1)/2;
+  for(let i=period-1;i<n;i++){
+    let sum=0, huboNaN=false;
+    for(let k=0;k<period;k++){
+      const v = values[i-k];
+      if(isNaN(v)){ huboNaN=true; break; }
+      sum += v*(period-k);
+    }
+    if(!huboNaN) out[i] = sum/denom;
+  }
+  return out;
+}
+
+// Hull Moving Average (réplica de ta.hma): WMA(2*WMA(n/2) - WMA(n), √n).
+function hmaSeries(values, period){
+  const halfPeriod = Math.round(period/2);
+  const sqrtPeriod = Math.round(Math.sqrt(period));
+  const wmaHalf = wmaSeries(values, halfPeriod);
+  const wmaFull = wmaSeries(values, period);
+  const n = values.length;
+  const diff = new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    if(!isNaN(wmaHalf[i]) && !isNaN(wmaFull[i])) diff[i] = 2*wmaHalf[i] - wmaFull[i];
+  }
+  return wmaSeries(diff, sqrtPeriod);
+}
+
+// Máximo/mínimo móvil (réplica de ta.highest/ta.lowest): ventana de
+// 'period' velas terminando EN la vela actual (inclusive).
+function rollingMax(values, period){
+  const n = values.length;
+  const out = new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    const desde = Math.max(0, i-period+1);
+    let max=-Infinity, huboValor=false;
+    for(let k=desde;k<=i;k++){ if(!isNaN(values[k])){ huboValor=true; if(values[k]>max) max=values[k]; } }
+    out[i] = huboValor ? max : NaN;
+  }
+  return out;
+}
+function rollingMin(values, period){
+  const n = values.length;
+  const out = new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    const desde = Math.max(0, i-period+1);
+    let min=Infinity, huboValor=false;
+    for(let k=desde;k<=i;k++){ if(!isNaN(values[k])){ huboValor=true; if(values[k]<min) min=values[k]; } }
+    out[i] = huboValor ? min : NaN;
+  }
+  return out;
+}
+
 function awesomeOscillator(highs,lows){
   const n=highs.length;
   const median=highs.map((h,i)=>(h+lows[i])/2);
@@ -443,6 +520,75 @@ function laguerreRSIState(larsi){
 }
 
 /* =========================================================
+   TREND SPEED ANALYZER (Zeiierman) — réplica fiel del Pine Script v6
+   Solo se implementa el valor final "trendspeed" (histograma verde/rojo)
+   que es lo único que necesitamos para la señal; la tabla de estadísticas
+   de olas (bullish/bearish wave arrays) no se replica, no aporta señal.
+========================================================= */
+function computeTrendSpeedAnalyzer(opens, highs, lows, closes, maxLength, accelMultiplier){
+  if(maxLength==null) maxLength = 50;
+  if(accelMultiplier==null) accelMultiplier = 5.0;
+  const n = closes.length;
+
+  // ~~ Dynamic Average (dyn_length) ~~
+  const countsDiff = closes; // counts_diff = close, literal del Pine
+  const absCountsDiff = countsDiff.map(v=>Math.abs(v));
+  const maxAbsCountsDiff200 = rollingMax(absCountsDiff, 200);
+  const dynLength = new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    if(isNaN(maxAbsCountsDiff200[i]) || maxAbsCountsDiff200[i]===0) continue;
+    const countsDiffNorm = (countsDiff[i] + maxAbsCountsDiff200[i]) / (2*maxAbsCountsDiff200[i]);
+    dynLength[i] = 5 + countsDiffNorm*(maxLength-5);
+  }
+
+  // ~~ Accelerator factor ~~
+  const deltaCountsDiff = new Array(n).fill(NaN);
+  for(let i=1;i<n;i++) deltaCountsDiff[i] = Math.abs(countsDiff[i]-countsDiff[i-1]);
+  const maxDeltaCountsDiff200 = rollingMax(deltaCountsDiff, 200);
+  const accelFactor = new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    let maxDelta = maxDeltaCountsDiff200[i];
+    if(isNaN(maxDelta) || maxDelta===0) maxDelta=1;
+    accelFactor[i] = isNaN(deltaCountsDiff[i]) ? NaN : deltaCountsDiff[i]/maxDelta;
+  }
+
+  // ~~ Alpha ajustado y EMA dinámica (dyn_ema) ~~
+  const alpha = new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    if(isNaN(dynLength[i]) || isNaN(accelFactor[i])) continue;
+    const alphaBase = 2/(dynLength[i]+1);
+    alpha[i] = Math.min(1, alphaBase*(1+accelFactor[i]*accelMultiplier));
+  }
+  const dynEma = new Array(n).fill(NaN);
+  for(let i=0;i<n;i++){
+    if(i===0 || isNaN(dynEma[i-1])) dynEma[i] = closes[i]; // na(dyn_ema[1]) → close
+    else if(!isNaN(alpha[i])) dynEma[i] = alpha[i]*closes[i] + (1-alpha[i])*dynEma[i-1];
+    else dynEma[i] = dynEma[i-1];
+  }
+  const trend = dynEma;
+
+  // ~~ Trend Speed: c=RMA(close,10), o=RMA(open,10) ~~
+  const c = rmaSeries(closes, 10);
+  const o = rmaSeries(opens, 10);
+
+  const speed = new Array(n).fill(0);
+  for(let i=1;i<n;i++){
+    if(isNaN(c[i]) || isNaN(o[i])){ speed[i] = speed[i-1]; continue; }
+    // OJO: réplica literal del Pine — compara bullsrc[1] contra 'trend' SIN
+    // desfase (el valor de HOY de dyn_ema), no contra trend[1]. Es así en
+    // el original, no un desliz de la traducción.
+    const bullCross = closes[i]>trend[i] && closes[i-1]<=trend[i];
+    const bearCross = closes[i]<trend[i] && closes[i-1]>=trend[i];
+    let s = (bullCross || bearCross) ? (c[i]-o[i]) : speed[i-1];
+    s = s + c[i] - o[i];
+    speed[i] = s;
+  }
+
+  const trendspeed = hmaSeries(speed, 5);
+  return { dynEma, speed, trendspeed };
+}
+
+/* =========================================================
    PIPELINE DE SERIES COMPLETAS
 ========================================================= */
 function computeFullSeries(ohlcv){
@@ -455,6 +601,7 @@ function computeFullSeries(ohlcv){
   const konc=koncordePlus(opens,highs,lows,closes,volumes);
   const larsi=computeLaguerreRSI(closes,0.2);
   const larsiState=laguerreRSIState(larsi);
+  const trendSpeed=computeTrendSpeedAnalyzer(opens,highs,lows,closes,50,5.0);
 
   const aoState=new Array(n).fill('Sin datos');
   const adxSubiendo=new Array(n).fill(false);
@@ -482,7 +629,8 @@ function computeFullSeries(ohlcv){
     oscp:konc.oscp, azul:konc.azul, tendencia:konc.tendencia, pececillos:konc.pececillos,
     maTrend:konc.maTrend, konVal:konc.konVal,
     aoState, adxSubiendo, koBull, koBear, koAbove,
-    larsi, larsiState
+    larsi, larsiState,
+    trendspeed: trendSpeed.trendspeed
   };
 }
 
@@ -2349,6 +2497,77 @@ async function main(){
   console.log('\n--- Comparación directa: coincidencia real en las entradas vs la esperada solo por azar ---');
   console.log('ML RSI en las entradas:       real ' + mlRealPct.toFixed(1) + '%  vs  esperado por azar ' + (baseEsperadaML*100).toFixed(1) + '%');
   console.log('LaRSI (lado) en las entradas: real ' + larsiRealPct.toFixed(1) + '%  vs  esperado por azar ' + (baseEsperadaLarsi*100).toFixed(1) + '%');
+
+  // ---------- ANÁLISIS AE: con el Trend Speed Analyzer ya incorporado — coincidencia individual y combinada ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AE — Trend Speed Analyzer: coincidencia individual y combinación conjunta con BBWP+LaRSI/ML RSI');
+  console.log('========================================');
+  console.log('Misma condición de BBWP que en el Análisis AC/AD. "Trend Speed cambia de signo" = trendspeed cruza');
+  console.log('de negativo a positivo (o al revés) justo en esa vela — el cambio de barras rojas a verdes que se veía');
+  console.log('en los dos casos de HBAR y BTC.');
+
+  function trendSpeedFlip(series, i){
+    if(i<1 || isNaN(series.trendspeed[i]) || isNaN(series.trendspeed[i-1])) return null;
+    if(series.trendspeed[i]>0 && series.trendspeed[i-1]<=0) return 'alcista';
+    if(series.trendspeed[i]<0 && series.trendspeed[i-1]>=0) return 'bajista';
+    return null;
+  }
+
+  console.log('\n--- 1) Coincidencia individual del Trend Speed con las entradas (misma condición de BBWP del AC) ---');
+  let tsOkEntrada=0;
+  entradasConBBWP.forEach(op=>{
+    const flip = trendSpeedFlip(s4H, op.entryIdx);
+    if((op.direction==='long' && flip==='alcista') || (op.direction==='short' && flip==='bajista')) tsOkEntrada++;
+  });
+  console.log('Trend Speed cruza de signo EN LA MISMA VELA que la entrada: ' + tsOkEntrada + '/' + entradasConBBWP.length + ' (' + (tsOkEntrada/entradasConBBWP.length*100).toFixed(1) + '%)');
+
+  // Tasa base del Trend Speed (sobre todas las velas con BBWP alto/subiendo, igual que en el AD)
+  let tsFlipAlcista=0, tsFlipBajista=0;
+  for(let i=0;i<s4H.n;i++){
+    if(!bbwpAscendiendoYAlto(s4H, i, 45, 3)) continue;
+    const flip = trendSpeedFlip(s4H, i);
+    if(flip==='alcista') tsFlipAlcista++;
+    else if(flip==='bajista') tsFlipBajista++;
+  }
+  const baseEsperadaTS = (entradasLargas/entradasConBBWP.length)*(tsFlipAlcista/totalVelasBBWP) + (entradasCortas/entradasConBBWP.length)*(tsFlipBajista/totalVelasBBWP);
+  console.log('Tasa base (cruce de Trend Speed en cualquier vela con BBWP alto/subiendo): ' + (baseEsperadaTS*100).toFixed(2) + '% — comparar contra el ' + (tsOkEntrada/entradasConBBWP.length*100).toFixed(1) + '% real de arriba');
+
+  console.log('\n--- 2) La combinación conjunta de los dos casos visuales: BBWP + Trend Speed + (LaRSI o ML RSI) a la vez ---');
+  console.log('Se busca, en una ventana de ±2 velas alrededor de cada entrada real: BBWP cumplido, Trend Speed');
+  console.log('cruzando de signo en la dirección correcta, Y (LaRSI del lado correcto O ML RSI coincide).');
+
+  function combinacionCercaDeEntrada(op){
+    const centro = op.entryIdx;
+    for(let i=Math.max(0,centro-2); i<=centro+2 && i<s4H.n; i++){
+      if(!bbwpAscendiendoYAlto(s4H, i, 45, 3)) continue;
+      const flip = trendSpeedFlip(s4H, i);
+      const tsOk = (op.direction==='long' && flip==='alcista') || (op.direction==='short' && flip==='bajista');
+      if(!tsOk) continue;
+      const larsiOk = !isNaN(s4H.larsi[i]) && (op.direction==='long' ? s4H.larsi[i]>0.5 : s4H.larsi[i]<0.5);
+      const mlOk = op.direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista';
+      if(larsiOk || mlOk) return true;
+    }
+    return false;
+  }
+
+  const todasLasEntradas = operacionesDetalle; // sin filtrar por BBWP esta vez — la condición ya va dentro de la función
+  let combinacionCoincide = 0;
+  todasLasEntradas.forEach(op=>{ if(combinacionCercaDeEntrada(op)) combinacionCoincide++; });
+  console.log('La combinación conjunta aparece cerca de ' + combinacionCoincide + '/' + todasLasEntradas.length + ' entradas reales (' + (combinacionCoincide/todasLasEntradas.length*100).toFixed(1) + '%)');
+
+  // Resultado de las operaciones donde SÍ apareció la combinación, comparado con las que no
+  const conCombinacion = todasLasEntradas.filter(op=>combinacionCercaDeEntrada(op)).map(op=>({equityChangePct:op.finalPct}));
+  const sinCombinacion = todasLasEntradas.filter(op=>!combinacionCercaDeEntrada(op)).map(op=>({equityChangePct:op.finalPct}));
+  const mConCombinacion = metricsForTradeSubset(conCombinacion);
+  const mSinCombinacion = metricsForTradeSubset(sinCombinacion);
+  console.log('\n--- ¿Las operaciones con la combinación presente salen mejor que las que no la tienen? ---');
+  console.log(pad('Grupo',24) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno medio',15) + padL('P.Factor',10));
+  const ganadorasConCombo = conCombinacion.filter(t=>t.equityChangePct>0).length;
+  const ganadorasSinCombo = sinCombinacion.filter(t=>t.equityChangePct>0).length;
+  const mediaConCombo = conCombinacion.reduce((a,t)=>a+t.equityChangePct,0)/conCombinacion.length;
+  const mediaSinCombo = sinCombinacion.reduce((a,t)=>a+t.equityChangePct,0)/sinCombinacion.length;
+  console.log(pad('Con la combinación',24) + padL(conCombinacion.length,9) + padL((ganadorasConCombo/conCombinacion.length*100).toFixed(1)+'%',11) + padL(fmtPct(mediaConCombo),15) + padL(mConCombinacion.profitFactor.toFixed(2),10));
+  console.log(pad('Sin la combinación',24) + padL(sinCombinacion.length,9) + padL((ganadorasSinCombo/sinCombinacion.length*100).toFixed(1)+'%',11) + padL(fmtPct(mediaSinCombo),15) + padL(mSinCombinacion.profitFactor.toFixed(2),10));
 
   console.log('\n=== Fin del backtest ===');
 }
