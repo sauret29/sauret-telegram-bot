@@ -2651,6 +2651,36 @@ async function main(){
   console.log('(mismo formato que el Análisis AF, para comparar directamente)');
   console.log('Retorno total si solo hubiéramos tomado esas ' + conAnticipacion.length + ' operaciones: ' + fmtPct(mConAnticipacion.totalReturnPct) + ' (frente al ' + fmtPct(rParcial20.totalReturnPct) + ' de la 20/80 completa sin ningún filtro)');
 
+  // ---------- ANÁLISIS AH: ¿la FUERZA del Trend Speed en la entrada predice un movimiento más fuerte después? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AH — ¿Entrar cuando el Trend Speed ya viene con fuerza predice un movimiento posterior más fuerte?');
+  console.log('========================================');
+  console.log('No es solo si el Trend Speed está a favor o en contra, sino CUÁNTO — su magnitud. Se agrupan las');
+  console.log('operaciones por la fuerza del Trend Speed (alineada con la dirección) justo en el momento de entrar,');
+  console.log('y se compara el mejor punto que llegó a alcanzar cada grupo después.');
+
+  const operacionesConFuerza = operacionesDetalle.map(op=>{
+    const ts = s4H.trendspeed[op.entryIdx];
+    const fuerzaAlineada = isNaN(ts) ? NaN : (op.direction==='long' ? ts : -ts);
+    return { ...op, fuerzaAlineada };
+  }).filter(op=>!isNaN(op.fuerzaAlineada));
+
+  const ordenadoPorFuerza = [...operacionesConFuerza].sort((a,b)=>a.fuerzaAlineada-b.fuerzaAlineada);
+  const tamCuartilFuerza = Math.floor(ordenadoPorFuerza.length/4);
+  console.log('\nOperaciones con Trend Speed disponible: ' + operacionesConFuerza.length + ' de ' + operacionesDetalle.length);
+  console.log('\n' + pad('Cuartil fuerza',18) + padL('Rango',22) + padL('Operac.',9) + padL('% Acierto',11) + padL('Mejor punto medio',18) + padL('Resultado medio',16));
+  for(let q=0;q<4;q++){
+    const desde = q*tamCuartilFuerza, hasta = (q===3) ? ordenadoPorFuerza.length : (q+1)*tamCuartilFuerza;
+    const grupo = ordenadoPorFuerza.slice(desde,hasta);
+    if(!grupo.length) continue;
+    const ganadoras = grupo.filter(op=>op.finalPct>0).length;
+    const mejorMedio = grupo.reduce((a,op)=>a+op.mejorPct,0)/grupo.length;
+    const finalMedio = grupo.reduce((a,op)=>a+op.finalPct,0)/grupo.length;
+    const rango = grupo[0].fuerzaAlineada.toFixed(1) + ' a ' + grupo[grupo.length-1].fuerzaAlineada.toFixed(1);
+    const etiqueta = q===0 ? 'Q1 (más débil/contra)' : q===3 ? 'Q4 (más fuerte/a favor)' : 'Q'+(q+1);
+    console.log(pad(etiqueta,18) + padL(rango,22) + padL(grupo.length,9) + padL((ganadoras/grupo.length*100).toFixed(1)+'%',11) + padL(fmtPct(mejorMedio),18) + padL(fmtPct(finalMedio),16));
+  }
+
   console.log('\n=== Fin del backtest ===');
 }
 
