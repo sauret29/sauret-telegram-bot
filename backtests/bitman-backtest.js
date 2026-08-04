@@ -3109,6 +3109,44 @@ async function main(){
   console.log(pad('Resto del histórico',20) + padL(mAntesTrail08.trades,9) + padL(mAntesTrail08.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesTrail08.totalReturnPct),12) + padL('-'+mAntesTrail08.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesTrail08.profitFactor.toFixed(2),10));
   console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoTrail08.trades,9) + padL(mReservadoTrail08.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoTrail08.totalReturnPct),12) + padL('-'+mReservadoTrail08.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoTrail08.profitFactor.toFixed(2),10));
 
+  // ---------- ANÁLISIS AT: las operaciones excepcionales — cuántas por año, en qué años, y en qué dirección ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AT — Las operaciones excepcionales del trailing: ¿cuántas por año, en qué años, y en qué dirección?');
+  console.log('========================================');
+  console.log('Se aíslan las operaciones con resultado muy por encima de lo típico (umbral: +3% de cuenta,');
+  console.log('varias veces la media general de ~0.2-0.3%) y se desglosan por año y por dirección (largo/corto).');
+
+  function operacionesExcepcionales(r, umbral){
+    return r.tradeLog.filter(t=>t.equityChangePct >= umbral).map(t=>{
+      const direction = (s4H.aoState[t.entryIdx]==='Alcista' && s4H.koBull[t.entryIdx]) ? 'long' : 'short';
+      const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+      return { ...t, direction, year };
+    });
+  }
+
+  [{nombre:'-0.8%', r:rTrail08}, {nombre:'-1.0%', r:rTrail10}].forEach(({nombre, r})=>{
+    const excepcionales = operacionesExcepcionales(r, 3);
+    console.log('\n--- Trailing ' + nombre + ': ' + excepcionales.length + ' operaciones excepcionales (≥+3% de cuenta) de ' + r.trades + ' totales (' + (excepcionales.length/r.trades*100).toFixed(2) + '%) ---');
+
+    const porAnio = {};
+    excepcionales.forEach(t=>{ porAnio[t.year] = (porAnio[t.year]||0) + 1; });
+    console.log(pad('Año',8) + padL('Excepcionales',15));
+    Object.keys(porAnio).map(Number).sort((a,b)=>a-b).forEach(year=>{
+      console.log(pad(String(year),8) + padL(porAnio[year],15));
+    });
+    const aniosConAlguna = Object.keys(porAnio).length;
+    console.log('Media por año (repartido entre los ' + aniosConAlguna + ' años que tuvieron alguna): ' + (excepcionales.length/aniosConAlguna).toFixed(1));
+
+    const largas = excepcionales.filter(t=>t.direction==='long').length;
+    const cortas = excepcionales.filter(t=>t.direction==='short').length;
+    console.log('Dirección: largas (compra) ' + largas + ' (' + (largas/excepcionales.length*100).toFixed(1) + '%) · cortas (venta) ' + cortas + ' (' + (cortas/excepcionales.length*100).toFixed(1) + '%)');
+
+    console.log('Detalle de cada una (año, dirección, resultado):');
+    excepcionales.sort((a,b)=>a.entryIdx-b.entryIdx).forEach(t=>{
+      console.log('  ' + t.year + ' · ' + (t.direction==='long'?'COMPRA':'VENTA') + ' · +' + t.equityChangePct.toFixed(2) + '%');
+    });
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
