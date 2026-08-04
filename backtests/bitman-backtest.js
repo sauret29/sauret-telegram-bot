@@ -2924,6 +2924,42 @@ async function main(){
     console.log(pad('-'+slPct+'%',8) + padL(m.trades,9) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
   });
 
+  // ---------- ANÁLISIS AP: operaciones cerradas por veredicto en la 20/80 real — ¿había un punto mejor antes? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AP — Operaciones cerradas por cambio de veredicto (20/80 real): ¿hubo un punto mejor antes del cierre?');
+  console.log('========================================');
+  console.log('Se sigue el camino vela a vela de cada operación que NUNCA tocó el TP parcial (se cerró entera');
+  console.log('por cambio de veredicto o forzado) y se compara el resultado final con el mejor punto alcanzado');
+  console.log('durante su vida — usando la 20/80 real del bot, no la configuración antigua del Análisis Q.');
+
+  function caminoFlotanteEquityPct(series, entryIdx, exitIdx, direction, leverage, marginFraction){
+    const entryPrice = series.closes[entryIdx];
+    const path = [];
+    for(let k=entryIdx; k<=exitIdx; k++){
+      const rawPct = direction==='long' ? (series.closes[k]/entryPrice - 1) : (1 - series.closes[k]/entryPrice);
+      path.push(rawPct * leverage * marginFraction * 100);
+    }
+    return path;
+  }
+
+  const rParaCamino = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  const cerradasPorVeredicto = rParaCamino.tradeLog.filter(t=>!t.tocoTP);
+  console.log('\nTotal de operaciones cerradas por veredicto/forzado (nunca tocaron el TP): ' + cerradasPorVeredicto.length + ' de ' + rParaCamino.trades);
+
+  let conPuntoMejor = 0, sumaMejoraPerdida = 0;
+  cerradasPorVeredicto.forEach(t=>{
+    const direction = (s4H.aoState[t.entryIdx]==='Alcista' && s4H.koBull[t.entryIdx]) ? 'long' : 'short';
+    const path = caminoFlotanteEquityPct(s4H, t.entryIdx, t.exitIdx, direction, LEVERAGE, 0.12);
+    const mejorPuntoPath = Math.max(...path);
+    const finalPath = path[path.length-1];
+    if(mejorPuntoPath > finalPath + 0.01){ // margen mínimo para evitar ruido de redondeo
+      conPuntoMejor++;
+      sumaMejoraPerdida += (mejorPuntoPath - finalPath);
+    }
+  });
+  console.log('\nDe esas ' + cerradasPorVeredicto.length + ' operaciones, ' + conPuntoMejor + ' (' + (conPuntoMejor/cerradasPorVeredicto.length*100).toFixed(1) + '%) tuvieron un punto anterior mejor que el cierre final.');
+  console.log('Mejora media perdida en esos casos: +' + (sumaMejoraPerdida/conPuntoMejor).toFixed(2) + ' puntos porcentuales de cuenta (respecto al cierre real por veredicto).');
+
   console.log('\n=== Fin del backtest ===');
 }
 
