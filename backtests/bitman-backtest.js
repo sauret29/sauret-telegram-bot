@@ -2695,6 +2695,36 @@ async function main(){
     console.log(pad(tpPct+'%',14) + padL((tpPct*LEVERAGE)+'%',15) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
   });
 
+  // ---------- ANÁLISIS AJ: localizar el salto de drawdown entre 3% y 3.5% ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AJ — ¿Dónde exactamente salta el drawdown entre TP 3% y 3.5%, y qué año es responsable?');
+  console.log('========================================');
+  console.log('Confirmación: el Análisis AI (y este) NO usan ningún filtro de indicador — es la 20/80 base,');
+  console.log('sin ML RSI ni ningún otro añadido, tal como está validada.');
+
+  console.log('\n--- Barrido fino entre 3.0% y 3.5%, en pasos de 0.1% ---');
+  console.log(pad('TP (precio)',14) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  [3.0, 3.1, 3.2, 3.3, 3.4, 3.5].forEach(tpPct=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, tpPct, LEVERAGE, 0.12, 4, 0.20, false);
+    console.log(pad(tpPct.toFixed(1)+'%',14) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
+  });
+
+  console.log('\n--- Comparación año por año: TP 3% (el actual) vs TP 3.5% (donde ya salta el drawdown) ---');
+  const r3 = simulateConfluenciaTPParcial(s4H, sD, 3.0, LEVERAGE, 0.12, 4, 0.20, false);
+  const r35 = simulateConfluenciaTPParcial(s4H, sD, 3.5, LEVERAGE, 0.12, 4, 0.20, false);
+  const buckets3 = {}, buckets35 = {};
+  r3.tradeLog.forEach(t=>{ const y=new Date(s4H.times[t.entryIdx]).getUTCFullYear(); (buckets3[y]=buckets3[y]||[]).push(t); });
+  r35.tradeLog.forEach(t=>{ const y=new Date(s4H.times[t.entryIdx]).getUTCFullYear(); (buckets35[y]=buckets35[y]||[]).push(t); });
+  console.log(pad('Año',8) + padL('DD con TP 3%',15) + padL('DD con TP 3.5%',16) + padL('Diferencia',13));
+  const todosLosAnios = new Set([...Object.keys(buckets3), ...Object.keys(buckets35)]);
+  [...todosLosAnios].map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m3 = metricsForTradeSubset(buckets3[year]||[]);
+    const m35 = metricsForTradeSubset(buckets35[year]||[]);
+    const diferencia = m35.maxDrawdownPct - m3.maxDrawdownPct;
+    const marca = diferencia>3 ? '  <-- aquí' : '';
+    console.log(pad(String(year),8) + padL('-'+m3.maxDrawdownPct.toFixed(1)+'%',15) + padL('-'+m35.maxDrawdownPct.toFixed(1)+'%',16) + padL(diferencia.toFixed(1)+' pts',13) + marca);
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
