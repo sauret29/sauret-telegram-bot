@@ -2997,6 +2997,50 @@ async function main(){
     console.log(pad('-'+trailPct+'%',10) + padL(m.trades,9) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
   });
 
+  // ---------- ANÁLISIS AR: validación rigurosa del trailing al 1% (el pico sospechoso del AQ) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AR — Validación rigurosa del trailing al 1%: ¿es un hallazgo real o sobreajuste?');
+  console.log('========================================');
+  console.log('El pico aislado del Análisis AQ en -1% (rodeado de valores mucho peores) es la señal clásica');
+  console.log('de sobreajuste. Antes de aceptarlo, se somete al mismo walk-forward + fuera de muestra que el');
+  console.log('resto de hallazgos de hoy (ML RSI, Trend Speed, BBWP).');
+
+  const rTrail1AR = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, undefined, undefined, 1);
+
+  console.log('\n--- Walk-forward año por año, trailing -1% ---');
+  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const bucketsTrail1 = {};
+  rTrail1AR.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!bucketsTrail1[year]) bucketsTrail1[year] = [];
+    bucketsTrail1[year].push(t);
+  });
+  let aniosPositivosTrail1=0, aniosTotalTrail1=0;
+  Object.keys(bucketsTrail1).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(bucketsTrail1[year]);
+    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    aniosTotalTrail1++;
+    if(m.totalReturnPct>0) aniosPositivosTrail1++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivosTrail1 + ' de ' + aniosTotalTrail1);
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados ---');
+  const cutoffReservadoTrail1 = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntesTrail1 = rTrail1AR.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservadoTrail1);
+  const tradesReservadoTrail1 = rTrail1AR.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservadoTrail1);
+  const mAntesTrail1 = metricsForTradeSubset(tradesAntesTrail1);
+  const mReservadoTrail1 = metricsForTradeSubset(tradesReservadoTrail1);
+  console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntesTrail1.trades,9) + padL(mAntesTrail1.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesTrail1.totalReturnPct),12) + padL('-'+mAntesTrail1.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesTrail1.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoTrail1.trades,9) + padL(mReservadoTrail1.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoTrail1.totalReturnPct),12) + padL('-'+mReservadoTrail1.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoTrail1.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Barrido fino entre 0.5% y 1.5%, en pasos de 0.1%, para ver si hay una ZONA buena o solo un pico ---');
+  console.log(pad('Trailing',10) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5].forEach(tp=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, undefined, undefined, tp);
+    console.log(pad('-'+tp+'%',10) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
