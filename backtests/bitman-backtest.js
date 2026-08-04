@@ -1316,8 +1316,8 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
     maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
   }
 
-  function cerrarOperacionCompleta(){
-    trades.push({ equityChangePct: (equity/equityAntesEntrada - 1)*100, entryIdx, tocoTP: tpParcialHecho });
+  function cerrarOperacionCompleta(iExit){
+    trades.push({ equityChangePct: (equity/equityAntesEntrada - 1)*100, entryIdx, exitIdx: iExit, tocoTP: tpParcialHecho });
     position=null; entryPrice=null; tpPrice=null; entryIdx=null; tpParcialHecho=false; equityAntesEntrada=null;
   }
 
@@ -1335,7 +1335,7 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
           tpParcialHecho = true; fraccionRestante = 1-fraccionCierre; ultimoCierreIdx = i;
         } else if(forzado || !stillValid){
           cerrarFraccion(1.0, series4H.closes[i], BITGET_TAKER_FEE_PCT, i, entryIdx);
-          cerrarOperacionCompleta();
+          cerrarOperacionCompleta(i);
         }
       } else {
         // Ya se cobró la parte parcial — el resto corre con las reglas normales
@@ -1346,10 +1346,10 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
         const hitBreakeven = protegerBreakeven && (position==='long' ? series4H.lows[i] <= entryPrice : series4H.highs[i] >= entryPrice);
         if(hitBreakeven){
           cerrarFraccion(fraccionRestante, entryPrice, BITGET_TAKER_FEE_PCT, i, ultimoCierreIdx);
-          cerrarOperacionCompleta();
+          cerrarOperacionCompleta(i);
         } else if(forzado || !stillValid){
           cerrarFraccion(fraccionRestante, series4H.closes[i], BITGET_TAKER_FEE_PCT, i, ultimoCierreIdx);
-          cerrarOperacionCompleta();
+          cerrarOperacionCompleta(i);
         }
       }
     }
@@ -1373,7 +1373,7 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
     const fraccionFinal = tpParcialHecho ? fraccionRestante : 1.0;
     const desde = tpParcialHecho ? ultimoCierreIdx : entryIdx;
     cerrarFraccion(fraccionFinal, series4H.closes[n-1], BITGET_TAKER_FEE_PCT, n-1, desde);
-    cerrarOperacionCompleta();
+    cerrarOperacionCompleta(n-1);
   }
 
   const wins = trades.filter(t=>t.equityChangePct>0).length;
@@ -2772,6 +2772,31 @@ async function main(){
   console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
   console.log(pad('Resto del histórico',20) + padL(mAntesTS.trades,9) + padL(mAntesTS.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesTS.totalReturnPct),12) + padL('-'+mAntesTS.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesTS.profitFactor.toFixed(2),10));
   console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoTS.trades,9) + padL(mReservadoTS.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoTS.totalReturnPct),12) + padL('-'+mReservadoTS.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoTS.profitFactor.toFixed(2),10));
+
+  // ---------- ANÁLISIS AL: ¿cuánto tiempo suelen durar las operaciones, tal cual está programado el bot? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AL — Duración media de las operaciones (configuración 20/80 real del bot)');
+  console.log('========================================');
+  console.log('Desde la entrada hasta el cierre completo (ambos tramos), medido en horas y días.');
+
+  const rDuracion = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  const duraciones = rDuracion.tradeLog.map(t => (t.exitIdx - t.entryIdx) * 4); // en horas (velas de 4H)
+
+  const mediaGeneral = duraciones.reduce((a,d)=>a+d,0) / duraciones.length;
+  const ordenadas = [...duraciones].sort((a,b)=>a-b);
+  const mediana = ordenadas[Math.floor(ordenadas.length/2)];
+  console.log('\nTotal de operaciones: ' + duraciones.length);
+  console.log('Duración media: ' + mediaGeneral.toFixed(1) + ' horas (' + (mediaGeneral/24).toFixed(1) + ' días)');
+  console.log('Duración mediana: ' + mediana + ' horas (' + (mediana/24).toFixed(1) + ' días) — menos afectada por casos extremos que la media');
+  console.log('Más corta: ' + Math.min(...duraciones) + 'h · Más larga: ' + Math.max(...duraciones) + 'h (' + (Math.max(...duraciones)/24).toFixed(1) + ' días)');
+
+  console.log('\n--- Desglose: operaciones que tocaron el TP parcial vs las que no ---');
+  const conTP = rDuracion.tradeLog.filter(t=>t.tocoTP).map(t=>(t.exitIdx-t.entryIdx)*4);
+  const sinTP = rDuracion.tradeLog.filter(t=>!t.tocoTP).map(t=>(t.exitIdx-t.entryIdx)*4);
+  const mediaConTP = conTP.reduce((a,d)=>a+d,0)/conTP.length;
+  const mediaSinTP = sinTP.reduce((a,d)=>a+d,0)/sinTP.length;
+  console.log('Tocaron el TP parcial (' + conTP.length + ' operaciones): media ' + mediaConTP.toFixed(1) + 'h (' + (mediaConTP/24).toFixed(1) + ' días)');
+  console.log('NO tocaron el TP (' + sinTP.length + ' operaciones): media ' + mediaSinTP.toFixed(1) + 'h (' + (mediaSinTP/24).toFixed(1) + ' días)');
 
   console.log('\n=== Fin del backtest ===');
 }
