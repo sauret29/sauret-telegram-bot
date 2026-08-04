@@ -402,6 +402,47 @@ function koncordePlus(opens,highs,lows,closes,volumes){
 }
 
 /* =========================================================
+   LAGUERRE RSI (Ehlers / Kıvanç Özbilgiç) — réplica exacta del Pine Script
+========================================================= */
+// Devuelve un array de valores 0-1 (multiplicar por 100 para la escala del
+// indicador original). alpha=0.2 por defecto, igual que el Pine original.
+function computeLaguerreRSI(closes, alpha){
+  if(alpha==null) alpha = 0.2;
+  const gamma = 1 - alpha;
+  const n = closes.length;
+  const larsi = new Array(n).fill(NaN);
+  let L0prev=0, L1prev=0, L2prev=0, L3prev=0;
+  for(let i=0;i<n;i++){
+    const src = closes[i];
+    const L0 = (1-gamma)*src + gamma*L0prev;
+    const L1 = -gamma*L0 + L0prev + gamma*L1prev;
+    const L2 = -gamma*L1 + L1prev + gamma*L2prev;
+    const L3 = -gamma*L2 + L2prev + gamma*L3prev;
+    const cu = (L0>L1?L0-L1:0) + (L1>L2?L1-L2:0) + (L2>L3?L2-L3:0);
+    const cd = (L0<L1?L1-L0:0) + (L1<L2?L2-L1:0) + (L2<L3?L3-L2:0);
+    const denom = cu+cd;
+    larsi[i] = denom===0 ? 0 : cu/denom;
+    L0prev=L0; L1prev=L1; L2prev=L2; L3prev=L3;
+  }
+  return larsi;
+}
+
+// Estado por vela, replicando las dos alertcondition del Pine original:
+// "cruza por encima de 20" = señal de compra; "cruza por debajo de 80" = señal
+// de venta. El resto de velas quedan "neutral" (sin cruce en ese momento).
+function laguerreRSIState(larsi){
+  const n = larsi.length;
+  const estado = new Array(n).fill('neutral');
+  for(let i=1;i<n;i++){
+    if(isNaN(larsi[i]) || isNaN(larsi[i-1])) continue;
+    const actual = larsi[i]*100, previo = larsi[i-1]*100;
+    if(previo<=20 && actual>20) estado[i] = 'compra';
+    else if(previo>=80 && actual<80) estado[i] = 'venta';
+  }
+  return estado;
+}
+
+/* =========================================================
    PIPELINE DE SERIES COMPLETAS
 ========================================================= */
 function computeFullSeries(ohlcv){
@@ -412,6 +453,8 @@ function computeFullSeries(ohlcv){
   const atr=atrWilder(highs,lows,closes,14);
   const bbwp=bbwpSeries(closes,13,252);
   const konc=koncordePlus(opens,highs,lows,closes,volumes);
+  const larsi=computeLaguerreRSI(closes,0.2);
+  const larsiState=laguerreRSIState(larsi);
 
   const aoState=new Array(n).fill('Sin datos');
   const adxSubiendo=new Array(n).fill(false);
@@ -438,7 +481,8 @@ function computeFullSeries(ohlcv){
     ao, adx, plusDI, minusDI, atr, bbwp,
     oscp:konc.oscp, azul:konc.azul, tendencia:konc.tendencia, pececillos:konc.pececillos,
     maTrend:konc.maTrend, konVal:konc.konVal,
-    aoState, adxSubiendo, koBull, koBear, koAbove
+    aoState, adxSubiendo, koBull, koBear, koAbove,
+    larsi, larsiState
   };
 }
 
@@ -1072,6 +1116,18 @@ function contarCambiosAO(series, i, ventana){
     if(series.aoState[k] !== series.aoState[k-1]) cambios++;
   }
   return cambios;
+}
+
+// BBWP "alto o acercándose, y en subida": por encima del umbral (por defecto 45,
+// para cubrir tanto "ya pasó de 50" como "a punto de llegar"), Y estrictamente
+// mayor que 'lookback' velas atrás (confirma que está subiendo, no bajando ni
+// plano).
+function bbwpAscendiendoYAlto(series, i, umbral, lookback){
+  if(umbral==null) umbral = 45;
+  if(lookback==null) lookback = 3;
+  if(i<lookback) return false;
+  if(isNaN(series.bbwp[i]) || isNaN(series.bbwp[i-lookback])) return false;
+  return series.bbwp[i] >= umbral && series.bbwp[i] > series.bbwp[i-lookback];
 }
 
 // Cuenta cuántas velas SEGUIDAS (incluyendo i, mirando hacia atrás sin cortes)
@@ -2187,6 +2243,58 @@ async function main(){
     const media = grupo.reduce((a,t)=>a+t.equityChangePct,0)/grupo.length;
     console.log(pad(nombre,12) + padL(grupo.length,9) + padL((ganadoras/grupo.length*100).toFixed(1)+'%',11) + padL(fmtPct(media),15));
   });
+
+  // ---------- ANÁLISIS AC: ¿qué indicadores coinciden con entradas/salidas cuando BBWP sube por encima del 50%? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AC — Coincidencia de ML RSI (4H) y LaRSI con entradas/salidas, solo cuando BBWP≥45 y en subida');
+  console.log('========================================');
+  console.log('Condición de filtro: BBWP en el momento de la entrada/salida por encima de 45 (cubre "ya pasó de 50"');
+  console.log('y "a punto de llegar") Y estrictamente más alto que 3 velas atrás (confirma que está en subida, no bajando).');
+  console.log('Nota: Trend Speed Analyzer no se incluye — requiere migrar su motor desde el archivo aparte donde vive,');
+  console.log('y ya se descartó como indicador no viable en su momento; se puede añadir en una pasada aparte si interesa.');
+
+  console.log('\nCalculando ML RSI también en 4H (puede tardar un poco menos que en 1H, hay menos velas)...');
+  const t0AC = Date.now();
+  const mlSignal4H = computeMLRSISeries(s4H.closes);
+  console.log('ML RSI en 4H calculado en ' + ((Date.now()-t0AC)/1000).toFixed(1) + 's');
+
+  const operacionesDetalle = analizarOperacionesDetallado(s4H, sD, verdicts4H, 3, LEVERAGE, 0.12, 4);
+  console.log('\nTotal de operaciones (entrada+salida) analizadas: ' + operacionesDetalle.length);
+
+  console.log('\n--- EN LAS ENTRADAS ---');
+  const entradasConBBWP = operacionesDetalle.filter(op => bbwpAscendiendoYAlto(s4H, op.entryIdx, 45, 3));
+  console.log('De ' + operacionesDetalle.length + ' entradas, ' + entradasConBBWP.length + ' cumplen la condición de BBWP (' + (entradasConBBWP.length/operacionesDetalle.length*100).toFixed(1) + '%)');
+  if(entradasConBBWP.length){
+    let mlOk=0, larsiLadoOk=0, larsiCruceOk=0;
+    entradasConBBWP.forEach(op=>{
+      const i = op.entryIdx;
+      if(op.direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista') mlOk++;
+      if(!isNaN(s4H.larsi[i]) && (op.direction==='long' ? s4H.larsi[i]>0.5 : s4H.larsi[i]<0.5)) larsiLadoOk++;
+      if(op.direction==='long' ? s4H.larsiState[i]==='compra' : s4H.larsiState[i]==='venta') larsiCruceOk++;
+    });
+    console.log('  ML RSI (4H) coincide en dirección: ' + mlOk + '/' + entradasConBBWP.length + ' (' + (mlOk/entradasConBBWP.length*100).toFixed(1) + '%)');
+    console.log('  LaRSI del lado correcto (>50 largo / <50 corto): ' + larsiLadoOk + '/' + entradasConBBWP.length + ' (' + (larsiLadoOk/entradasConBBWP.length*100).toFixed(1) + '%)');
+    console.log('  LaRSI con cruce exacto esa misma vela: ' + larsiCruceOk + '/' + entradasConBBWP.length + ' (' + (larsiCruceOk/entradasConBBWP.length*100).toFixed(1) + '%)');
+  }
+
+  console.log('\n--- EN LAS SALIDAS (solo por cambio de veredicto o cierre forzado, no por TP) ---');
+  const salidasReales = operacionesDetalle.filter(op => op.motivo==='veredicto' || op.motivo==='forzado');
+  const salidasConBBWP = salidasReales.filter(op => bbwpAscendiendoYAlto(s4H, op.exitIdx, 45, 3));
+  console.log('De ' + salidasReales.length + ' salidas reales, ' + salidasConBBWP.length + ' cumplen la condición de BBWP (' + (salidasConBBWP.length/salidasReales.length*100).toFixed(1) + '%)');
+  if(salidasConBBWP.length){
+    let mlOk=0, larsiLadoOk=0, larsiCruceOk=0;
+    salidasConBBWP.forEach(op=>{
+      const i = op.exitIdx;
+      // En una salida, el indicador "coincide" si apunta en la dirección CONTRARIA
+      // a la posición que se está cerrando (el giro que motivó la salida).
+      if(op.direction==='long' ? mlSignal4H[i]==='Bajista' : mlSignal4H[i]==='Alcista') mlOk++;
+      if(!isNaN(s4H.larsi[i]) && (op.direction==='long' ? s4H.larsi[i]<0.5 : s4H.larsi[i]>0.5)) larsiLadoOk++;
+      if(op.direction==='long' ? s4H.larsiState[i]==='venta' : s4H.larsiState[i]==='compra') larsiCruceOk++;
+    });
+    console.log('  ML RSI (4H) coincide con el giro: ' + mlOk + '/' + salidasConBBWP.length + ' (' + (mlOk/salidasConBBWP.length*100).toFixed(1) + '%)');
+    console.log('  LaRSI del lado del giro (>50/<50): ' + larsiLadoOk + '/' + salidasConBBWP.length + ' (' + (larsiLadoOk/salidasConBBWP.length*100).toFixed(1) + '%)');
+    console.log('  LaRSI con cruce exacto esa misma vela: ' + larsiCruceOk + '/' + salidasConBBWP.length + ' (' + (larsiCruceOk/salidasConBBWP.length*100).toFixed(1) + '%)');
+  }
 
   console.log('\n=== Fin del backtest ===');
 }
