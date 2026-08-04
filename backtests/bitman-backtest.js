@@ -2609,6 +2609,48 @@ async function main(){
   });
   console.log('Años con retorno positivo: ' + aniosPositivosFiltroML + ' de ' + aniosTotalFiltroML);
 
+  // ---------- ANÁLISIS AG: ML RSI en 1H, ¿anticiparse mejora el resultado (a diferencia de exigirlo en la misma vela)? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AG — ML RSI en 1H (temporalidad menor): ¿anticiparse mejora el resultado, a diferencia del filtro en la misma vela?');
+  console.log('========================================');
+  console.log('En vez de exigir que el ML RSI coincida EN LA MISMA vela de 4H (Análisis AF, no ayudó), aquí se');
+  console.log('comprueba si el ML RSI de 1H YA VENÍA confirmando la dirección correcta en las horas previas a');
+  console.log('la entrada — sin descartar ninguna operación, solo comparando resultado según si se adelantó o no.');
+
+  const idx1HPara4H = alignDailyIndex(s, s4H.times); // para cada vela de 4H, el índice de 1H más reciente
+  const VENTANA_ANTICIPACION_HORAS = 12; // 12 velas de 1H = 12 horas hacia atrás
+
+  function mlRSI1HYaConfirmabaAntes(entryIdx4H, direction){
+    const idx1H = idx1HPara4H[entryIdx4H];
+    if(idx1H<0) return false;
+    const desde = Math.max(0, idx1H - VENTANA_ANTICIPACION_HORAS);
+    for(let k=desde; k<=idx1H; k++){
+      const match = direction==='long' ? mlSignal[k]==='Alcista' : mlSignal[k]==='Bajista';
+      if(match) return true;
+    }
+    return false;
+  }
+
+  const todasLas2080 = rParcial20.tradeLog.map(t=>{
+    const direction = (s4H.aoState[t.entryIdx]==='Alcista' && s4H.koBull[t.entryIdx]) ? 'long' : 'short';
+    return { ...t, direction, seAnticipo: mlRSI1HYaConfirmabaAntes(t.entryIdx, direction) };
+  });
+
+  const conAnticipacion = todasLas2080.filter(t=>t.seAnticipo);
+  const sinAnticipacion = todasLas2080.filter(t=>!t.seAnticipo);
+  console.log('\nDe ' + todasLas2080.length + ' operaciones (config. 20/80), el ML RSI de 1H ya confirmaba en las ' + VENTANA_ANTICIPACION_HORAS + 'h previas en ' + conAnticipacion.length + ' (' + (conAnticipacion.length/todasLas2080.length*100).toFixed(1) + '%)');
+
+  const mConAnticipacion = metricsForTradeSubset(conAnticipacion);
+  const mSinAnticipacion = metricsForTradeSubset(sinAnticipacion);
+  console.log('\n--- ¿El resultado real es mejor cuando el ML RSI de 1H se adelantó? ---');
+  console.log(pad('Grupo',26) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Con anticipación (1H)',26) + padL(conAnticipacion.length,9) + padL(mConAnticipacion.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mConAnticipacion.totalReturnPct),12) + padL('-'+mConAnticipacion.maxDrawdownPct.toFixed(1)+'%',11) + padL(mConAnticipacion.profitFactor.toFixed(2),10));
+  console.log(pad('Sin anticipación',26) + padL(sinAnticipacion.length,9) + padL(mSinAnticipacion.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mSinAnticipacion.totalReturnPct),12) + padL('-'+mSinAnticipacion.maxDrawdownPct.toFixed(1)+'%',11) + padL(mSinAnticipacion.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Como filtro real: solo tomar las operaciones donde el ML RSI de 1H ya se había adelantado ---');
+  console.log('(mismo formato que el Análisis AF, para comparar directamente)');
+  console.log('Retorno total si solo hubiéramos tomado esas ' + conAnticipacion.length + ' operaciones: ' + fmtPct(mConAnticipacion.totalReturnPct) + ' (frente al ' + fmtPct(rParcial20.totalReturnPct) + ' de la 20/80 completa sin ningún filtro)');
+
   console.log('\n=== Fin del backtest ===');
 }
 
