@@ -2835,6 +2835,54 @@ async function main(){
   console.log(pad('LaRSI alineado (0-100)',28) + padL(media(conTPIndicadores,'larsiAlineado').toFixed(1),14) + padL(media(sinTPIndicadores,'larsiAlineado').toFixed(1),16));
   console.log(pad('Trend Speed alineado',28) + padL(media(conTPIndicadores,'tsFuerza').toFixed(1),14) + padL(media(sinTPIndicadores,'tsFuerza').toFixed(1),16));
 
+  // ---------- ANÁLISIS AN: filtro real de BBWP — ¿exigir volatilidad alta en la entrada mejora de verdad? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AN — Filtro real de BBWP: ¿exigir BBWP>50 en la entrada mejora el resultado real?');
+  console.log('========================================');
+  console.log('Mismo formato que los Análisis AF (ML RSI) y AK (Trend Speed), para comparar en igualdad');
+  console.log('de condiciones — mismo simulador validado, mismo tipo de prueba.');
+
+  const filtroBBWP = (i, direction) => {
+    const b = s4H.bbwp[i];
+    if(isNaN(b)) return true;
+    return b > 50;
+  };
+
+  const rSinFiltroBBWP = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  const rConFiltroBBWP = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, filtroBBWP);
+
+  console.log('\n--- Comparación directa (20/80, 12% capital, 5x) ---');
+  console.log(pad('Variante',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Sin filtro BBWP',20) + padL(rSinFiltroBBWP.trades,9) + padL(rSinFiltroBBWP.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSinFiltroBBWP.totalReturnPct),12) + padL('-'+rSinFiltroBBWP.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSinFiltroBBWP.profitFactor.toFixed(2),10));
+  console.log(pad('Con filtro BBWP',20) + padL(rConFiltroBBWP.trades,9) + padL(rConFiltroBBWP.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rConFiltroBBWP.totalReturnPct),12) + padL('-'+rConFiltroBBWP.maxDrawdownPct.toFixed(1)+'%',11) + padL(rConFiltroBBWP.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Walk-forward año por año, CON el filtro de BBWP ---');
+  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const bucketsFiltroBBWP = {};
+  rConFiltroBBWP.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!bucketsFiltroBBWP[year]) bucketsFiltroBBWP[year] = [];
+    bucketsFiltroBBWP[year].push(t);
+  });
+  let aniosPositivosBBWP=0, aniosTotalBBWP=0;
+  Object.keys(bucketsFiltroBBWP).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(bucketsFiltroBBWP[year]);
+    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    aniosTotalBBWP++;
+    if(m.totalReturnPct>0) aniosPositivosBBWP++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivosBBWP + ' de ' + aniosTotalBBWP);
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados ---');
+  const cutoffReservadoBBWP = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntesBBWP = rConFiltroBBWP.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservadoBBWP);
+  const tradesReservadoBBWP = rConFiltroBBWP.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservadoBBWP);
+  const mAntesBBWP = metricsForTradeSubset(tradesAntesBBWP);
+  const mReservadoBBWP = metricsForTradeSubset(tradesReservadoBBWP);
+  console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntesBBWP.trades,9) + padL(mAntesBBWP.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesBBWP.totalReturnPct),12) + padL('-'+mAntesBBWP.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesBBWP.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoBBWP.trades,9) + padL(mReservadoBBWP.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoBBWP.totalReturnPct),12) + padL('-'+mReservadoBBWP.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoBBWP.profitFactor.toFixed(2),10));
+
   console.log('\n=== Fin del backtest ===');
 }
 
