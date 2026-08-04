@@ -3191,6 +3191,30 @@ async function main(){
   const excCortas = excepcionalesConPerfil.filter(o=>o.direction==='short').length;
   console.log('Largas: ' + excLargas + ' · Cortas: ' + excCortas);
 
+  // ---------- ANÁLISIS AV: ¿la combinación BBWP≥90 + ML RSI coincide es una señal real, o la comparten muchas mediocres? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AV — ¿BBWP≥90 + ML RSI coincide distingue de verdad, o la comparten muchas operaciones mediocres?');
+  console.log('========================================');
+  console.log('18 de las 26 excepcionales (69%) tenían esta combinación. Aquí se comprueba cuántas operaciones');
+  console.log('de TODAS las 1.510 (no solo las excepcionales) también la cumplen — y qué resultado tuvieron.');
+
+  const conFirma = perfilOperaciones.filter(o=>o.bbwp>=90 && o.mlCoincide);
+  const sinFirma = perfilOperaciones.filter(o=>!(o.bbwp>=90 && o.mlCoincide));
+  const excepcionalesConComb = conFirma.filter(o=>o.equityChangePct>=3).length;
+  const excepcionalesSinComb = sinFirma.filter(o=>o.equityChangePct>=3).length;
+
+  console.log('\nOperaciones con BBWP≥90 + ML RSI coincide: ' + conFirma.length + ' de ' + perfilOperaciones.length + ' totales (' + (conFirma.length/perfilOperaciones.length*100).toFixed(1) + '%)');
+  console.log('  De esas, ' + excepcionalesConComb + ' fueron excepcionales (≥+3%) — tasa: ' + (excepcionalesConComb/conFirma.length*100).toFixed(2) + '%');
+  console.log('Operaciones SIN esa combinación: ' + sinFirma.length);
+  console.log('  De esas, ' + excepcionalesSinComb + ' fueron excepcionales (≥+3%) — tasa: ' + (excepcionalesSinComb/sinFirma.length*100).toFixed(2) + '%');
+
+  const mConComb = metricsForTradeSubset(conFirma.map(o=>({equityChangePct:o.equityChangePct})));
+  const mSinComb = metricsForTradeSubset(sinFirma.map(o=>({equityChangePct:o.equityChangePct})));
+  console.log('\n--- Resultado agregado de cada grupo (comparable con el Análisis AS) ---');
+  console.log(pad('Grupo',20)+padL('Operac.',9)+padL('% Acierto',11)+padL('Retorno',14)+padL('P.Factor',10));
+  console.log(pad('Con la combinación',20)+padL(mConComb.trades,9)+padL(mConComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mConComb.totalReturnPct),14)+padL(mConComb.profitFactor.toFixed(2),10));
+  console.log(pad('Sin la combinación',20)+padL(mSinComb.trades,9)+padL(mSinComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mSinComb.totalReturnPct),14)+padL(mSinComb.profitFactor.toFixed(2),10));
+
   console.log('\n=== Fin del backtest ===');
 }
 
