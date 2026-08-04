@@ -2725,6 +2725,54 @@ async function main(){
     console.log(pad(String(year),8) + padL('-'+m3.maxDrawdownPct.toFixed(1)+'%',15) + padL('-'+m35.maxDrawdownPct.toFixed(1)+'%',16) + padL(diferencia.toFixed(1)+' pts',13) + marca);
   });
 
+  // ---------- ANÁLISIS AK: filtro real de Trend Speed — ¿excluir Q1 (en contra) mejora de verdad? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AK — Filtro real de Trend Speed: ¿excluir las entradas donde va en contra mejora el resultado real?');
+  console.log('========================================');
+  console.log('Se exige que el Trend Speed, alineado con la dirección de la entrada, sea positivo (aunque sea');
+  console.log('poco) — igual que se hizo con el ML RSI en el Análisis AF, usando el MISMO simulador validado.');
+
+  const filtroTrendSpeed = (i, direction) => {
+    const ts = s4H.trendspeed[i];
+    if(isNaN(ts)) return true; // si no hay dato, no se descarta por este filtro
+    return direction==='long' ? ts>0 : ts<0;
+  };
+
+  const rSinFiltroTS = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  const rConFiltroTS = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, filtroTrendSpeed);
+
+  console.log('\n--- Comparación directa (20/80, 12% capital, 5x) ---');
+  console.log(pad('Variante',26) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Sin filtro Trend Speed',26) + padL(rSinFiltroTS.trades,9) + padL(rSinFiltroTS.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSinFiltroTS.totalReturnPct),12) + padL('-'+rSinFiltroTS.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSinFiltroTS.profitFactor.toFixed(2),10));
+  console.log(pad('Con filtro Trend Speed',26) + padL(rConFiltroTS.trades,9) + padL(rConFiltroTS.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rConFiltroTS.totalReturnPct),12) + padL('-'+rConFiltroTS.maxDrawdownPct.toFixed(1)+'%',11) + padL(rConFiltroTS.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Walk-forward año por año, CON el filtro de Trend Speed ---');
+  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const bucketsFiltroTS = {};
+  rConFiltroTS.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!bucketsFiltroTS[year]) bucketsFiltroTS[year] = [];
+    bucketsFiltroTS[year].push(t);
+  });
+  let aniosPositivosFiltroTS=0, aniosTotalFiltroTS=0;
+  Object.keys(bucketsFiltroTS).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(bucketsFiltroTS[year]);
+    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    aniosTotalFiltroTS++;
+    if(m.totalReturnPct>0) aniosPositivosFiltroTS++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivosFiltroTS + ' de ' + aniosTotalFiltroTS);
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados ---');
+  const cutoffReservadoTS = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntesTS = rConFiltroTS.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservadoTS);
+  const tradesReservadoTS = rConFiltroTS.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservadoTS);
+  const mAntesTS = metricsForTradeSubset(tradesAntesTS);
+  const mReservadoTS = metricsForTradeSubset(tradesReservadoTS);
+  console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntesTS.trades,9) + padL(mAntesTS.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesTS.totalReturnPct),12) + padL('-'+mAntesTS.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesTS.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoTS.trades,9) + padL(mReservadoTS.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoTS.totalReturnPct),12) + padL('-'+mReservadoTS.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoTS.profitFactor.toFixed(2),10));
+
   console.log('\n=== Fin del backtest ===');
 }
 
