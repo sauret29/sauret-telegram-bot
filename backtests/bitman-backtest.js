@@ -1074,6 +1074,16 @@ function contarCambiosAO(series, i, ventana){
   return cambios;
 }
 
+// Cuenta cuántas velas SEGUIDAS (incluyendo i, mirando hacia atrás sin cortes)
+// una condición ha sido verdadera. Un valor alto significa que esa condición
+// "avisó primero" — llevaba cumplida desde antes; un valor de 1 significa que
+// se acaba de cumplir justo en esta vela (es la que "dispara" la entrada).
+function velasLlevaCumplida(getCondicion, i){
+  let count = 0, k = i;
+  while(k >= 0 && getCondicion(k)){ count++; k--; }
+  return count;
+}
+
 // Confluencia en 4H con TAKE PROFIT PARCIAL: al tocar el TP (3% de precio),
 // cierra solo una FRACCIÓN de la posición (fraccionCierre) y deja correr el
 // resto con las reglas de salida normales (cambio de veredicto / cierre
@@ -2111,6 +2121,72 @@ async function main(){
   console.log(pad('1H / confirma 4H',22) + padL(r1H4H.trades,9) + padL(fmtPct(r1H4H.totalReturnPct),12) + padL('-'+r1H4H.maxDrawdownPct.toFixed(1)+'%',11) + padL(r1H4H.profitFactor.toFixed(2),10));
   console.log(pad('30M / confirma 4H',22) + padL(r30M4H.trades,9) + padL(fmtPct(r30M4H.totalReturnPct),12) + padL('-'+r30M4H.maxDrawdownPct.toFixed(1)+'%',11) + padL(r30M4H.profitFactor.toFixed(2),10));
   console.log(pad('15M / confirma 1H',22) + padL(r15M1H.trades,9) + padL(fmtPct(r15M1H.totalReturnPct),12) + padL('-'+r15M1H.maxDrawdownPct.toFixed(1)+'%',11) + padL(r15M1H.profitFactor.toFixed(2),10));
+
+  // ---------- ANÁLISIS AB: ¿qué indicador avisa primero, y cuál es más fiable? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AB — ¿Qué indicador (AO/ADX/Koncorde) avisa primero, y cuál es más fiable como disparador?');
+  console.log('========================================');
+  console.log('Para cada entrada de la configuración 20/80 validada, se mide cuántas velas seguidas');
+  console.log('llevaba ya cumplida cada condición por separado. La que lleva MÁS velas avisó primero');
+  console.log('(esperaba a las demás); la que lleva MENOS (normalmente 1) es la que "dispara" la entrada');
+  console.log('en ese momento exacto — la última pieza en encajar.');
+
+  const rParaOrden = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  const idxDParaOrden = alignDailyIndex(sD, s4H.times);
+
+  const analisisOrden = rParaOrden.tradeLog.map(t=>{
+    const i = t.entryIdx;
+    // Reconstruir la dirección a partir del propio veredicto en ese momento
+    const direccion = (s4H.aoState[i]==='Alcista' && s4H.koBull[i]) ? 'long' : 'short';
+    const condAO  = (k) => direccion==='long' ? s4H.aoState[k]==='Alcista' : s4H.aoState[k]==='Bajista';
+    const condADX = (k) => s4H.adxSubiendo[k];
+    const condKON = (k) => direccion==='long' ? (s4H.konVal[k]>s4H.maTrend[k]) : (s4H.konVal[k]<s4H.maTrend[k]);
+    return {
+      equityChangePct: t.equityChangePct,
+      velasAO: velasLlevaCumplida(condAO, i),
+      velasADX: velasLlevaCumplida(condADX, i),
+      velasKON: velasLlevaCumplida(condKON, i)
+    };
+  });
+
+  console.log('\n--- ¿Cuál avisa primero en promedio? (más velas ya cumplida = avisa antes) ---');
+  const mediaAO = analisisOrden.reduce((a,t)=>a+t.velasAO,0)/analisisOrden.length;
+  const mediaADX = analisisOrden.reduce((a,t)=>a+t.velasADX,0)/analisisOrden.length;
+  const mediaKON = analisisOrden.reduce((a,t)=>a+t.velasKON,0)/analisisOrden.length;
+  console.log('AO:       ' + mediaAO.toFixed(2) + ' velas de media ya cumplida antes de la entrada');
+  console.log('ADX:      ' + mediaADX.toFixed(2) + ' velas de media ya cumplida antes de la entrada');
+  console.log('Koncorde: ' + mediaKON.toFixed(2) + ' velas de media ya cumplida antes de la entrada');
+
+  console.log('\n--- ¿Cuál "dispara" la entrada más veces (la última en llegar, valor=1)? ---');
+  let disparaAO=0, disparaADX=0, disparaKON=0, empate=0;
+  const gruposDisparador = {AO:[], ADX:[], Koncorde:[]};
+  analisisOrden.forEach(t=>{
+    const minimo = Math.min(t.velasAO, t.velasADX, t.velasKON);
+    const disparadores = [];
+    if(t.velasAO===minimo) disparadores.push('AO');
+    if(t.velasADX===minimo) disparadores.push('ADX');
+    if(t.velasKON===minimo) disparadores.push('Koncorde');
+    if(disparadores.length===1){
+      if(disparadores[0]==='AO') disparaAO++;
+      if(disparadores[0]==='ADX') disparaADX++;
+      if(disparadores[0]==='Koncorde') disparaKON++;
+      gruposDisparador[disparadores[0]].push(t);
+    } else empate++;
+  });
+  console.log('AO dispara la entrada en ' + disparaAO + ' operaciones (' + (disparaAO/analisisOrden.length*100).toFixed(1) + '%)');
+  console.log('ADX dispara la entrada en ' + disparaADX + ' operaciones (' + (disparaADX/analisisOrden.length*100).toFixed(1) + '%)');
+  console.log('Koncorde dispara la entrada en ' + disparaKON + ' operaciones (' + (disparaKON/analisisOrden.length*100).toFixed(1) + '%)');
+  console.log('Empates (varios a la vez): ' + empate + ' operaciones');
+
+  console.log('\n--- ¿Es más fiable la operación según cuál fue el disparador? ---');
+  console.log(pad('Disparador',12) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno medio',15));
+  Object.keys(gruposDisparador).forEach(nombre=>{
+    const grupo = gruposDisparador[nombre];
+    if(!grupo.length) return;
+    const ganadoras = grupo.filter(t=>t.equityChangePct>0).length;
+    const media = grupo.reduce((a,t)=>a+t.equityChangePct,0)/grupo.length;
+    console.log(pad(nombre,12) + padL(grupo.length,9) + padL((ganadoras/grupo.length*100).toFixed(1)+'%',11) + padL(fmtPct(media),15));
+  });
 
   console.log('\n=== Fin del backtest ===');
 }
