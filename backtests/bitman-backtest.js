@@ -2296,6 +2296,60 @@ async function main(){
     console.log('  LaRSI con cruce exacto esa misma vela: ' + larsiCruceOk + '/' + salidasConBBWP.length + ' (' + (larsiCruceOk/salidasConBBWP.length*100).toFixed(1) + '%)');
   }
 
+  // ---------- ANÁLISIS AD: tasas base — ¿los porcentajes del AC son mejores que el puro azar? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AD — Tasas base de cada indicador (para interpretar el Análisis AC con criterio)');
+  console.log('========================================');
+  console.log('Mismos indicadores, pero medidos sobre TODAS las velas de 4H que cumplen la condición de');
+  console.log('BBWP (no solo las de entrada/salida) — así sabemos qué tasa de "acierto por pura casualidad"');
+  console.log('cabría esperar, y podemos comparar los porcentajes del Análisis AC contra ese punto de partida.');
+
+  let totalVelasBBWP = 0;
+  let mlAlcista=0, mlBajista=0, mlOtro=0;
+  let larsiArriba=0, larsiAbajo=0;
+  let larsiCompra=0, larsiVenta=0;
+  for(let i=0; i<s4H.n; i++){
+    if(!bbwpAscendiendoYAlto(s4H, i, 45, 3)) continue;
+    totalVelasBBWP++;
+    if(mlSignal4H[i]==='Alcista') mlAlcista++;
+    else if(mlSignal4H[i]==='Bajista') mlBajista++;
+    else mlOtro++;
+    if(!isNaN(s4H.larsi[i])){
+      if(s4H.larsi[i]>0.5) larsiArriba++;
+      else larsiAbajo++;
+    }
+    if(s4H.larsiState[i]==='compra') larsiCompra++;
+    else if(s4H.larsiState[i]==='venta') larsiVenta++;
+  }
+  console.log('\nTotal de velas de 4H que cumplen la condición de BBWP (de un total de ' + s4H.n + '): ' + totalVelasBBWP);
+  console.log('\n--- Tasas base (sobre TODAS esas velas, no solo entradas/salidas) ---');
+  console.log('ML RSI (4H): Alcista ' + (mlAlcista/totalVelasBBWP*100).toFixed(1) + '% · Bajista ' + (mlBajista/totalVelasBBWP*100).toFixed(1) + '% · Otro/neutral ' + (mlOtro/totalVelasBBWP*100).toFixed(1) + '%');
+  console.log('LaRSI del lado: >50 (arriba) ' + (larsiArriba/totalVelasBBWP*100).toFixed(1) + '% · <50 (abajo) ' + (larsiAbajo/totalVelasBBWP*100).toFixed(1) + '%');
+  console.log('LaRSI cruces: compra ' + (larsiCompra/totalVelasBBWP*100).toFixed(2) + '% de las velas · venta ' + (larsiVenta/totalVelasBBWP*100).toFixed(2) + '% de las velas');
+
+  const entradasLargas = entradasConBBWP.filter(op=>op.direction==='long').length;
+  const entradasCortas = entradasConBBWP.filter(op=>op.direction==='short').length;
+  console.log('\n--- Reparto largo/corto de las entradas ya vistas en el Análisis AC (para ponderar la comparación) ---');
+  console.log('Entradas largas: ' + entradasLargas + ' (' + (entradasLargas/entradasConBBWP.length*100).toFixed(1) + '%) · Entradas cortas: ' + entradasCortas + ' (' + (entradasCortas/entradasConBBWP.length*100).toFixed(1) + '%)');
+
+  // Recalcular aquí mismo la coincidencia real (no reutilizar texto fijo del log
+  // anterior), para que quede siempre consistente con los datos de esta misma
+  // ejecución.
+  let mlOkReal=0, larsiLadoOkReal=0;
+  entradasConBBWP.forEach(op=>{
+    const i = op.entryIdx;
+    if(op.direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista') mlOkReal++;
+    if(!isNaN(s4H.larsi[i]) && (op.direction==='long' ? s4H.larsi[i]>0.5 : s4H.larsi[i]<0.5)) larsiLadoOkReal++;
+  });
+  const mlRealPct = mlOkReal/entradasConBBWP.length*100;
+  const larsiRealPct = larsiLadoOkReal/entradasConBBWP.length*100;
+
+  const baseEsperadaML = (entradasLargas/entradasConBBWP.length)*(mlAlcista/totalVelasBBWP) + (entradasCortas/entradasConBBWP.length)*(mlBajista/totalVelasBBWP);
+  const baseEsperadaLarsi = (entradasLargas/entradasConBBWP.length)*(larsiArriba/totalVelasBBWP) + (entradasCortas/entradasConBBWP.length)*(larsiAbajo/totalVelasBBWP);
+  console.log('\n--- Comparación directa: coincidencia real en las entradas vs la esperada solo por azar ---');
+  console.log('ML RSI en las entradas:       real ' + mlRealPct.toFixed(1) + '%  vs  esperado por azar ' + (baseEsperadaML*100).toFixed(1) + '%');
+  console.log('LaRSI (lado) en las entradas: real ' + larsiRealPct.toFixed(1) + '%  vs  esperado por azar ' + (baseEsperadaLarsi*100).toFixed(1) + '%');
+
   console.log('\n=== Fin del backtest ===');
 }
 
