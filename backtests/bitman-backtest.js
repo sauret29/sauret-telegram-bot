@@ -3147,6 +3147,50 @@ async function main(){
     });
   });
 
+  // ---------- ANÁLISIS AU: perfil de indicadores de las operaciones excepcionales, y quién más comparte ese perfil ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AU — Perfil de indicadores de las 26 operaciones excepcionales (trailing -1.0%), y quién más lo comparte');
+  console.log('========================================');
+  console.log('Para cada una de las 26 operaciones excepcionales, se listan sus indicadores en el momento de');
+  console.log('entrar. Después se compara el perfil medio de las excepcionales contra el resto, y se comprueba');
+  console.log('cuántas operaciones NO excepcionales comparten un perfil similar (para ver si es detectable).');
+
+  const perfilOperaciones = rTrail10.tradeLog.map(t=>{
+    const i = t.entryIdx;
+    const direction = (s4H.aoState[i]==='Alcista' && s4H.koBull[i]) ? 'long' : 'short';
+    const mlCoincide = direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista';
+    const larsiValor = isNaN(s4H.larsi[i]) ? NaN : s4H.larsi[i]*100;
+    const larsiAlineado = isNaN(larsiValor) ? NaN : (direction==='long' ? larsiValor : (100-larsiValor));
+    const tsFuerza = isNaN(s4H.trendspeed[i]) ? NaN : (direction==='long' ? s4H.trendspeed[i] : -s4H.trendspeed[i]);
+    const cambiosAO = contarCambiosAO(s4H, i, 12);
+    const year = new Date(s4H.times[i]).getUTCFullYear();
+    return { equityChangePct:t.equityChangePct, direction, year, bbwp:s4H.bbwp[i], cambiosAO, mlCoincide, larsiAlineado, tsFuerza };
+  });
+
+  const excepcionalesConPerfil = perfilOperaciones.filter(o=>o.equityChangePct>=3);
+  const restoConPerfil = perfilOperaciones.filter(o=>o.equityChangePct<3);
+
+  console.log('\n--- Detalle de las 26 operaciones excepcionales: indicadores en el momento de entrar ---');
+  console.log(pad('Año',6)+pad('Dir.',6)+padL('Result.',9)+padL('BBWP',7)+padL('CambiosAO',11)+padL('MLcoinc.',10)+padL('LaRSI',8)+padL('TrendSp.',11));
+  excepcionalesConPerfil.forEach(o=>{
+    console.log(pad(String(o.year),6)+pad(o.direction==='long'?'COMPRA':'VENTA',6)+padL('+'+o.equityChangePct.toFixed(1)+'%',9)+padL(o.bbwp.toFixed(0),7)+padL(o.cambiosAO,11)+padL(o.mlCoincide?'sí':'no',10)+padL(o.larsiAlineado.toFixed(0),8)+padL(o.tsFuerza.toFixed(0),11));
+  });
+
+  // (media y pctTrue ya están definidas más arriba, en el Análisis AM — se reutilizan aquí)
+
+  console.log('\n--- Perfil medio: excepcionales vs resto ---');
+  console.log(pad('Indicador',22)+padL('Excepcionales',15)+padL('Resto',12));
+  console.log(pad('BBWP',22)+padL(media(excepcionalesConPerfil,'bbwp').toFixed(1),15)+padL(media(restoConPerfil,'bbwp').toFixed(1),12));
+  console.log(pad('Cambios AO (12 velas)',22)+padL(media(excepcionalesConPerfil,'cambiosAO').toFixed(2),15)+padL(media(restoConPerfil,'cambiosAO').toFixed(2),12));
+  console.log(pad('ML RSI coincide (%)',22)+padL(pctTrue(excepcionalesConPerfil,'mlCoincide').toFixed(1)+'%',15)+padL(pctTrue(restoConPerfil,'mlCoincide').toFixed(1)+'%',12));
+  console.log(pad('LaRSI alineado',22)+padL(media(excepcionalesConPerfil,'larsiAlineado').toFixed(1),15)+padL(media(restoConPerfil,'larsiAlineado').toFixed(1),12));
+  console.log(pad('Trend Speed alineado',22)+padL(media(excepcionalesConPerfil,'tsFuerza').toFixed(1),15)+padL(media(restoConPerfil,'tsFuerza').toFixed(1),12));
+
+  console.log('\n--- Reparto largo/corto y por año, dentro de este mismo grupo excepcional ---');
+  const excLargas = excepcionalesConPerfil.filter(o=>o.direction==='long').length;
+  const excCortas = excepcionalesConPerfil.filter(o=>o.direction==='short').length;
+  console.log('Largas: ' + excLargas + ' · Cortas: ' + excCortas);
+
   console.log('\n=== Fin del backtest ===');
 }
 
