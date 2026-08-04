@@ -1295,11 +1295,11 @@ function velasLlevaCumplida(getCondicion, i){
 // cierra si el precio vuelve al precio de entrada (breakeven), para que la
 // operación completa nunca pueda terminar en negativo tras haber cobrado
 // la parte parcial.
-function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela, fraccionCierre, protegerBreakeven, filtroEntradaExtra){
+function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela, fraccionCierre, protegerBreakeven, filtroEntradaExtra, slPct){
   const idxD = alignDailyIndex(seriesD, series4H.times);
   const n = series4H.n;
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
-  let position=null, entryPrice=null, tpPrice=null, entryIdx=null, tpParcialHecho=false, fraccionRestante=null, ultimoCierreIdx=null, equityAntesEntrada=null;
+  let position=null, entryPrice=null, tpPrice=null, slPrice=null, entryIdx=null, tpParcialHecho=false, fraccionRestante=null, ultimoCierreIdx=null, equityAntesEntrada=null;
   const trades = [];
   const nocionalFraction = marginFraction * leverage;
 
@@ -1325,11 +1325,16 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
     const iD = idxD[i];
     if(position){
       if(!tpParcialHecho){
+        const hitSL = slPct!=null && (position==='long' ? series4H.lows[i] <= slPrice : series4H.highs[i] >= slPrice);
         const hitTP = position==='long' ? series4H.highs[i] >= tpPrice : series4H.lows[i] <= tpPrice;
         const forzado = position==='long' && !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
         const v = verdicts4H_local(series4H, seriesD, i, iD);
         const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
-        if(hitTP){
+        if(hitSL){
+          // El SL tiene prioridad si ambos (SL y TP) ocurrieran en la misma vela — criterio conservador.
+          cerrarFraccion(1.0, slPrice, BITGET_TAKER_FEE_PCT, i, entryIdx);
+          cerrarOperacionCompleta(i);
+        } else if(hitTP){
           // Cierra la fracción indicada al precio del TP, deja correr el resto.
           cerrarFraccion(fraccionCierre, tpPrice, BITGET_MAKER_FEE_PCT, i, entryIdx);
           tpParcialHecho = true; fraccionRestante = 1-fraccionCierre; ultimoCierreIdx = i;
@@ -1339,12 +1344,16 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
         }
       } else {
         // Ya se cobró la parte parcial — el resto corre con las reglas normales
-        // (y opcionalmente breakeven) hasta su propio cierre.
+        // (y opcionalmente breakeven, y opcionalmente SL) hasta su propio cierre.
+        const hitSLResto = slPct!=null && (position==='long' ? series4H.lows[i] <= slPrice : series4H.highs[i] >= slPrice);
         const forzado = position==='long' && !isNaN(series4H.konVal[i]) && !isNaN(series4H.maTrend[i]) && series4H.konVal[i] < series4H.maTrend[i];
         const v = verdicts4H_local(series4H, seriesD, i, iD);
         const stillValid = (position==='long' && v==='COMPRAR') || (position==='short' && v==='VENDER');
         const hitBreakeven = protegerBreakeven && (position==='long' ? series4H.lows[i] <= entryPrice : series4H.highs[i] >= entryPrice);
-        if(hitBreakeven){
+        if(hitSLResto){
+          cerrarFraccion(fraccionRestante, slPrice, BITGET_TAKER_FEE_PCT, i, ultimoCierreIdx);
+          cerrarOperacionCompleta(i);
+        } else if(hitBreakeven){
           cerrarFraccion(fraccionRestante, entryPrice, BITGET_TAKER_FEE_PCT, i, ultimoCierreIdx);
           cerrarOperacionCompleta(i);
         } else if(forzado || !stillValid){
@@ -1362,6 +1371,7 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
           position = direction;
           entryPrice = series4H.closes[i];
           tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
+          slPrice = slPct!=null ? (position==='long' ? entryPrice*(1-slPct/100) : entryPrice*(1+slPct/100)) : null;
           entryIdx = i; tpParcialHecho=false; equityAntesEntrada=equity;
           const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
           equity *= Math.max(0, 1 - comisionEntradaPct/100);
@@ -2882,6 +2892,37 @@ async function main(){
   console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
   console.log(pad('Resto del histórico',20) + padL(mAntesBBWP.trades,9) + padL(mAntesBBWP.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesBBWP.totalReturnPct),12) + padL('-'+mAntesBBWP.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesBBWP.profitFactor.toFixed(2),10));
   console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoBBWP.trades,9) + padL(mReservadoBBWP.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoBBWP.totalReturnPct),12) + padL('-'+mReservadoBBWP.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoBBWP.profitFactor.toFixed(2),10));
+
+  // ---------- ANÁLISIS AO: barrido de Stop Loss sobre la 20/80 REAL (nunca probado hasta ahora) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AO — Barrido de Stop Loss sobre la configuración 20/80 real (nunca probado hasta ahora)');
+  console.log('========================================');
+  console.log('El Análisis N probó un SL ancho hace tiempo, pero sobre la configuración ANTIGUA (TP completo,');
+  console.log('2.550 operaciones) — nunca se ha probado sobre la 20/80 real que usa el bot ahora mismo.');
+  console.log('Objetivo: cortar antes las operaciones que ya se torcieron, sin tocar las que van bien.');
+
+  console.log('\n' + pad('SL',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const rSinSLAO = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  console.log(pad('(sin SL, actual)',8) + padL(rSinSLAO.trades,9) + padL(rSinSLAO.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSinSLAO.totalReturnPct),12) + padL('-'+rSinSLAO.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSinSLAO.profitFactor.toFixed(2),10));
+  const resultadosSL = {};
+  [1, 1.5, 2, 2.5, 3, 4, 5, 7, 10].forEach(slPct=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, undefined, slPct);
+    resultadosSL[slPct] = r;
+    console.log(pad('-'+slPct+'%',8) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
+  });
+
+  console.log('\n--- Efecto específico en 2021 (el año más golpeado por movimientos violentos) ---');
+  console.log(pad('SL',8) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  function metricasAnio(tradeLog, year){
+    const subset = tradeLog.filter(t => new Date(s4H.times[t.entryIdx]).getUTCFullYear()===year);
+    return metricsForTradeSubset(subset);
+  }
+  const m2021SinSL = metricasAnio(rSinSLAO.tradeLog, 2021);
+  console.log(pad('(sin SL)',8) + padL(m2021SinSL.trades,9) + padL(fmtPct(m2021SinSL.totalReturnPct),12) + padL('-'+m2021SinSL.maxDrawdownPct.toFixed(1)+'%',11) + padL(m2021SinSL.profitFactor.toFixed(2),10));
+  [1, 1.5, 2, 2.5, 3, 4, 5, 7, 10].forEach(slPct=>{
+    const m = metricasAnio(resultadosSL[slPct].tradeLog, 2021);
+    console.log(pad('-'+slPct+'%',8) + padL(m.trades,9) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+  });
 
   console.log('\n=== Fin del backtest ===');
 }
