@@ -2798,6 +2798,43 @@ async function main(){
   console.log('Tocaron el TP parcial (' + conTP.length + ' operaciones): media ' + mediaConTP.toFixed(1) + 'h (' + (mediaConTP/24).toFixed(1) + ' días)');
   console.log('NO tocaron el TP (' + sinTP.length + ' operaciones): media ' + mediaSinTP.toFixed(1) + 'h (' + (mediaSinTP/24).toFixed(1) + ' días)');
 
+  // ---------- ANÁLISIS AM: perfil de indicadores en la entrada — tocaron el TP vs no lo tocaron ---------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AM — Diferencia en los indicadores de ENTRADA: operaciones que tocaron el TP vs las que no');
+  console.log('========================================');
+  console.log('Para cada indicador, se pasa a una escala "a favor de la dirección de la entrada" (más alto =');
+  console.log('más a favor, tanto para largos como para cortos), y se compara la media entre los dos grupos.');
+
+  const operacionesConIndicadores = rDuracion.tradeLog.map(t=>{
+    const i = t.entryIdx;
+    const direction = (s4H.aoState[i]==='Alcista' && s4H.koBull[i]) ? 'long' : 'short';
+    const mlCoincide = direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista';
+    const larsiValor = isNaN(s4H.larsi[i]) ? NaN : s4H.larsi[i]*100;
+    const larsiAlineado = isNaN(larsiValor) ? NaN : (direction==='long' ? larsiValor : (100-larsiValor));
+    const tsFuerza = isNaN(s4H.trendspeed[i]) ? NaN : (direction==='long' ? s4H.trendspeed[i] : -s4H.trendspeed[i]);
+    const cambiosAO = contarCambiosAO(s4H, i, 12);
+    return { tocoTP: t.tocoTP, bbwp: s4H.bbwp[i], cambiosAO, mlCoincide, larsiAlineado, tsFuerza };
+  });
+
+  const conTPIndicadores = operacionesConIndicadores.filter(o=>o.tocoTP);
+  const sinTPIndicadores = operacionesConIndicadores.filter(o=>!o.tocoTP);
+
+  function media(arr, campo){
+    const vals = arr.map(o=>o[campo]).filter(v=>!isNaN(v));
+    return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : NaN;
+  }
+  function pctTrue(arr, campo){
+    return arr.length ? arr.filter(o=>o[campo]).length/arr.length*100 : NaN;
+  }
+
+  console.log('\nTocaron el TP: ' + conTPIndicadores.length + ' operaciones · NO tocaron el TP: ' + sinTPIndicadores.length + ' operaciones');
+  console.log('\n' + pad('Indicador (en la entrada)',28) + padL('Tocaron TP',14) + padL('NO tocaron TP',16));
+  console.log(pad('BBWP',28) + padL(media(conTPIndicadores,'bbwp').toFixed(1),14) + padL(media(sinTPIndicadores,'bbwp').toFixed(1),16));
+  console.log(pad('Cambios de AO (12 velas)',28) + padL(media(conTPIndicadores,'cambiosAO').toFixed(2),14) + padL(media(sinTPIndicadores,'cambiosAO').toFixed(2),16));
+  console.log(pad('ML RSI coincide (%)',28) + padL(pctTrue(conTPIndicadores,'mlCoincide').toFixed(1)+'%',14) + padL(pctTrue(sinTPIndicadores,'mlCoincide').toFixed(1)+'%',16));
+  console.log(pad('LaRSI alineado (0-100)',28) + padL(media(conTPIndicadores,'larsiAlineado').toFixed(1),14) + padL(media(sinTPIndicadores,'larsiAlineado').toFixed(1),16));
+  console.log(pad('Trend Speed alineado',28) + padL(media(conTPIndicadores,'tsFuerza').toFixed(1),14) + padL(media(sinTPIndicadores,'tsFuerza').toFixed(1),16));
+
   console.log('\n=== Fin del backtest ===');
 }
 
