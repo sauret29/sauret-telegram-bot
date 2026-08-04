@@ -1295,7 +1295,7 @@ function velasLlevaCumplida(getCondicion, i){
 // cierra si el precio vuelve al precio de entrada (breakeven), para que la
 // operación completa nunca pueda terminar en negativo tras haber cobrado
 // la parte parcial.
-function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela, fraccionCierre, protegerBreakeven){
+function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela, fraccionCierre, protegerBreakeven, filtroEntradaExtra){
   const idxD = alignDailyIndex(seriesD, series4H.times);
   const n = series4H.n;
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
@@ -1356,12 +1356,16 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
     if(!position){
       const v = verdicts4H_local(series4H, seriesD, i, iD);
       if(v==='COMPRAR' || v==='VENDER'){
-        position = v==='COMPRAR' ? 'long' : 'short';
-        entryPrice = series4H.closes[i];
-        tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
-        entryIdx = i; tpParcialHecho=false; equityAntesEntrada=equity;
-        const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
-        equity *= Math.max(0, 1 - comisionEntradaPct/100);
+        const direction = v==='COMPRAR' ? 'long' : 'short';
+        const pasaFiltroExtra = !filtroEntradaExtra || filtroEntradaExtra(i, direction);
+        if(pasaFiltroExtra){
+          position = direction;
+          entryPrice = series4H.closes[i];
+          tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
+          entryIdx = i; tpParcialHecho=false; equityAntesEntrada=equity;
+          const comisionEntradaPct = nocionalFraction * (BITGET_TAKER_FEE_PCT/100) * 100;
+          equity *= Math.max(0, 1 - comisionEntradaPct/100);
+        }
       }
     }
   }
@@ -2568,6 +2572,42 @@ async function main(){
   const mediaSinCombo = sinCombinacion.reduce((a,t)=>a+t.equityChangePct,0)/sinCombinacion.length;
   console.log(pad('Con la combinación',24) + padL(conCombinacion.length,9) + padL((ganadorasConCombo/conCombinacion.length*100).toFixed(1)+'%',11) + padL(fmtPct(mediaConCombo),15) + padL(mConCombinacion.profitFactor.toFixed(2),10));
   console.log(pad('Sin la combinación',24) + padL(sinCombinacion.length,9) + padL((ganadorasSinCombo/sinCombinacion.length*100).toFixed(1)+'%',11) + padL(fmtPct(mediaSinCombo),15) + padL(mSinCombinacion.profitFactor.toFixed(2),10));
+
+  // ---------- ANÁLISIS AF: ¿el filtro de ML RSI mejora de verdad el resultado, no solo la coincidencia? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AF — Filtro real de ML RSI (4H): ¿mejora el retorno/drawdown/profit factor de la 20/80?');
+  console.log('========================================');
+  console.log('Se exige que el ML RSI (4H) coincida con la dirección de la entrada, ADEMÁS de las condiciones');
+  console.log('normales de la Confluencia — usando el MISMO simulador validado, para que la comparación sea justa.');
+
+  const filtroMLRSI = (i, direction) => {
+    return direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista';
+  };
+
+  const rSinFiltroML = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  const rConFiltroML = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, filtroMLRSI);
+
+  console.log('\n--- Comparación directa (20/80, 12% capital, 5x) ---');
+  console.log(pad('Variante',22) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Sin filtro ML RSI',22) + padL(rSinFiltroML.trades,9) + padL(rSinFiltroML.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rSinFiltroML.totalReturnPct),12) + padL('-'+rSinFiltroML.maxDrawdownPct.toFixed(1)+'%',11) + padL(rSinFiltroML.profitFactor.toFixed(2),10));
+  console.log(pad('Con filtro ML RSI',22) + padL(rConFiltroML.trades,9) + padL(rConFiltroML.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rConFiltroML.totalReturnPct),12) + padL('-'+rConFiltroML.maxDrawdownPct.toFixed(1)+'%',11) + padL(rConFiltroML.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Walk-forward año por año, CON el filtro de ML RSI ---');
+  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const bucketsFiltroML = {};
+  rConFiltroML.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!bucketsFiltroML[year]) bucketsFiltroML[year] = [];
+    bucketsFiltroML[year].push(t);
+  });
+  let aniosPositivosFiltroML=0, aniosTotalFiltroML=0;
+  Object.keys(bucketsFiltroML).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(bucketsFiltroML[year]);
+    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    aniosTotalFiltroML++;
+    if(m.totalReturnPct>0) aniosPositivosFiltroML++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivosFiltroML + ' de ' + aniosTotalFiltroML);
 
   console.log('\n=== Fin del backtest ===');
 }
