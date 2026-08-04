@@ -2681,6 +2681,20 @@ async function main(){
     console.log(pad(etiqueta,18) + padL(rango,22) + padL(grupo.length,9) + padL((ganadoras/grupo.length*100).toFixed(1)+'%',11) + padL(fmtPct(mejorMedio),18) + padL(fmtPct(finalMedio),16));
   }
 
+  // ---------- ANÁLISIS AI: barrido del UMBRAL del TP (no la fracción) con la 20/80 actual ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AI — Barrido del umbral del TP (no la fracción) con la configuración 20/80 actual');
+  console.log('========================================');
+  console.log('Desde que existe el TP parcial, el umbral se ha quedado fijo en 3% de precio — nunca se ha');
+  console.log('vuelto a barrer con el reparto 20/80 ya validado. Aquí se prueba variando SOLO el umbral,');
+  console.log('con la fracción (20%) y el resto de la configuración exactamente igual que la validada.');
+
+  console.log('\n' + pad('TP (precio)',14) + padL('TP (posición)',15) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  [1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 8].forEach(tpPct=>{
+    const r = simulateConfluenciaTPParcial(s4H, sD, tpPct, LEVERAGE, 0.12, 4, 0.20, false);
+    console.log(pad(tpPct+'%',14) + padL((tpPct*LEVERAGE)+'%',15) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
