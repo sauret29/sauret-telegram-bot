@@ -3041,6 +3041,74 @@ async function main(){
     console.log(pad('-'+tp+'%',10) + padL(r.trades,9) + padL(fmtPct(r.totalReturnPct),12) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
   });
 
+  // ---------- ANÁLISIS AS: examen detallado de los trailings -0.8% y -1.0% ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AS — Examen detallado: trailing -0.8% y -1.0%');
+  console.log('========================================');
+  console.log('Duración de las operaciones, distribución real de resultados por operación (para ver si son');
+  console.log('muchas ganancias pequeñas y consistentes o pocas extremas), y validación completa del -0.8%');
+  console.log('(que todavía no tenía walk-forward ni fuera de muestra).');
+
+  const rTrail08 = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, undefined, undefined, 0.8);
+  const rTrail10 = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, undefined, undefined, 1.0);
+
+  function estadisticasDuracion(tradeLog){
+    const duraciones = tradeLog.map(t=>(t.exitIdx-t.entryIdx)*4);
+    const ordenadas = [...duraciones].sort((a,b)=>a-b);
+    return {
+      media: duraciones.reduce((a,d)=>a+d,0)/duraciones.length,
+      mediana: ordenadas[Math.floor(ordenadas.length/2)],
+      min: Math.min(...duraciones), max: Math.max(...duraciones)
+    };
+  }
+  function estadisticasPorOperacion(tradeLog){
+    const valores = tradeLog.map(t=>t.equityChangePct);
+    const ordenados = [...valores].sort((a,b)=>a-b);
+    return {
+      media: valores.reduce((a,v)=>a+v,0)/valores.length,
+      mediana: ordenados[Math.floor(ordenados.length/2)],
+      min: Math.min(...valores), max: Math.max(...valores),
+      ganadoras: valores.filter(v=>v>0).length, total: valores.length
+    };
+  }
+
+  [{nombre:'-0.8%', r:rTrail08}, {nombre:'-1.0%', r:rTrail10}].forEach(({nombre, r})=>{
+    const dur = estadisticasDuracion(r.tradeLog);
+    const porOp = estadisticasPorOperacion(r.tradeLog);
+    console.log('\n--- Trailing ' + nombre + ' (' + r.trades + ' operaciones) ---');
+    console.log('Duración: media ' + dur.media.toFixed(1) + 'h (' + (dur.media/24).toFixed(1) + ' días) · mediana ' + dur.mediana + 'h · rango ' + dur.min + 'h a ' + dur.max + 'h');
+    console.log('Resultado por operación: media ' + porOp.media.toFixed(3) + '% de cuenta · mediana ' + porOp.mediana.toFixed(3) + '%');
+    console.log('Mejor operación individual: +' + porOp.max.toFixed(2) + '% · Peor: ' + porOp.min.toFixed(2) + '%');
+    console.log('Ganadoras: ' + porOp.ganadoras + '/' + porOp.total + ' (' + (porOp.ganadoras/porOp.total*100).toFixed(1) + '%)');
+  });
+
+  console.log('\n--- Walk-forward año por año, trailing -0.8% (que todavía no teníamos) ---');
+  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  const bucketsTrail08 = {};
+  rTrail08.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!bucketsTrail08[year]) bucketsTrail08[year] = [];
+    bucketsTrail08[year].push(t);
+  });
+  let aniosPositivosTrail08=0, aniosTotalTrail08=0;
+  Object.keys(bucketsTrail08).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(bucketsTrail08[year]);
+    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),12) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    aniosTotalTrail08++;
+    if(m.totalReturnPct>0) aniosPositivosTrail08++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivosTrail08 + ' de ' + aniosTotalTrail08);
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados, trailing -0.8% ---');
+  const cutoffReservadoTrail08 = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntesTrail08 = rTrail08.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservadoTrail08);
+  const tradesReservadoTrail08 = rTrail08.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservadoTrail08);
+  const mAntesTrail08 = metricsForTradeSubset(tradesAntesTrail08);
+  const mReservadoTrail08 = metricsForTradeSubset(tradesReservadoTrail08);
+  console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntesTrail08.trades,9) + padL(mAntesTrail08.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesTrail08.totalReturnPct),12) + padL('-'+mAntesTrail08.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesTrail08.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoTrail08.trades,9) + padL(mReservadoTrail08.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoTrail08.totalReturnPct),12) + padL('-'+mReservadoTrail08.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoTrail08.profitFactor.toFixed(2),10));
+
   console.log('\n=== Fin del backtest ===');
 }
 
