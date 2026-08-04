@@ -56,7 +56,7 @@ async function fetchKlinesRaw(interval, limit, endTime){
 // con menos historial del que tendría en una situación real.
 async function fetchCandlesForMonths(interval, months, warmupMargin){
   if(warmupMargin==null) warmupMargin = 3050; // por defecto, margen para el ML RSI (solo se usa en 1H)
-  const msPerCandle = { '1h': 3600000, '4h': 14400000, '1d': 86400000 }[interval] || 3600000;
+  const msPerCandle = { '15m': 900000, '30m': 1800000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[interval] || 3600000;
   const monthsCandles = Math.ceil((months * 30 * 86400000) / msPerCandle);
   const targetCandles = monthsCandles + warmupMargin;
   let all = await fetchKlinesRaw(interval, SIGNAL_LIMIT);
@@ -2077,6 +2077,40 @@ async function main(){
     const m = metricsForTradeSubset(grupo);
     console.log(pad(String(year),8) + padL(grupo.length,9) + padL(bbwpMedio.toFixed(1),12) + padL(cambiosMedio.toFixed(2),18) + padL(fmtPct(m.totalReturnPct),13) + padL(m.profitFactor.toFixed(2),13));
   });
+
+  // ---------- ANÁLISIS AA: Fase 1 — cribado de temporalidades más pequeñas ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AA — Fase 1: cribado rápido de temporalidades más pequeñas (TP parcial 20%, 5x, 12% capital)');
+  console.log('========================================');
+  console.log('Solo se mira si sobreviven a las comisiones reales y cuántas operaciones generan —');
+  console.log('antes de invertir tiempo en optimizar o validar a fondo ninguna. Para 30M y 15M se usa');
+  console.log('una ventana más corta (12 meses) solo para este cribado inicial, no los ' + MESES_HISTORICO + ' meses completos.');
+
+  console.log('\n--- 1H confirmado por 4H (reutilizando los datos ya descargados) ---');
+  const r1H4H = simulateConfluenciaTPParcial(s, s4H, 3, LEVERAGE, 0.12, 1, 0.20, false);
+  console.log('Operaciones: ' + r1H4H.trades + ' · Retorno: ' + fmtPct(r1H4H.totalReturnPct) + ' · Drawdown: -' + r1H4H.maxDrawdownPct.toFixed(1) + '% · P.Factor: ' + r1H4H.profitFactor.toFixed(2));
+
+  const MESES_CRIBADO = 12;
+  console.log('\nDescargando velas de 30M y 15M (solo últimos ' + MESES_CRIBADO + ' meses, para el cribado)...');
+  const ohlcv30M = await fetchCandlesForMonths('30m', MESES_CRIBADO, 300);
+  const ohlcv15M = await fetchCandlesForMonths('15m', MESES_CRIBADO, 300);
+  const s30M = computeFullSeries(ohlcv30M);
+  const s15M = computeFullSeries(ohlcv15M);
+  console.log('Velas 30M: ' + s30M.n + ' · Velas 15M: ' + s15M.n);
+
+  console.log('\n--- 30M confirmado por 4H (últimos ' + MESES_CRIBADO + ' meses) ---');
+  const r30M4H = simulateConfluenciaTPParcial(s30M, s4H, 3, LEVERAGE, 0.12, 0.5, 0.20, false);
+  console.log('Operaciones: ' + r30M4H.trades + ' · Retorno: ' + fmtPct(r30M4H.totalReturnPct) + ' · Drawdown: -' + r30M4H.maxDrawdownPct.toFixed(1) + '% · P.Factor: ' + r30M4H.profitFactor.toFixed(2));
+
+  console.log('\n--- 15M confirmado por 1H (últimos ' + MESES_CRIBADO + ' meses) ---');
+  const r15M1H = simulateConfluenciaTPParcial(s15M, s, 3, LEVERAGE, 0.12, 0.25, 0.20, false);
+  console.log('Operaciones: ' + r15M1H.trades + ' · Retorno: ' + fmtPct(r15M1H.totalReturnPct) + ' · Drawdown: -' + r15M1H.maxDrawdownPct.toFixed(1) + '% · P.Factor: ' + r15M1H.profitFactor.toFixed(2));
+
+  console.log('\n--- Resumen comparativo ---');
+  console.log(pad('Combinación',22) + padL('Operac.',9) + padL('Retorno',12) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('1H / confirma 4H',22) + padL(r1H4H.trades,9) + padL(fmtPct(r1H4H.totalReturnPct),12) + padL('-'+r1H4H.maxDrawdownPct.toFixed(1)+'%',11) + padL(r1H4H.profitFactor.toFixed(2),10));
+  console.log(pad('30M / confirma 4H',22) + padL(r30M4H.trades,9) + padL(fmtPct(r30M4H.totalReturnPct),12) + padL('-'+r30M4H.maxDrawdownPct.toFixed(1)+'%',11) + padL(r30M4H.profitFactor.toFixed(2),10));
+  console.log(pad('15M / confirma 1H',22) + padL(r15M1H.trades,9) + padL(fmtPct(r15M1H.totalReturnPct),12) + padL('-'+r15M1H.maxDrawdownPct.toFixed(1)+'%',11) + padL(r15M1H.profitFactor.toFixed(2),10));
 
   console.log('\n=== Fin del backtest ===');
 }
