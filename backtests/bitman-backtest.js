@@ -1385,6 +1385,31 @@ function bbwpAcercandoseA(series, i, nivel, margen, lookback){
   return enRango && series.bbwp[i] > series.bbwp[i-lookback];
 }
 
+// Zona amarilla ÚNICA (no espejada): representa presión institucional alcista
+// acumulándose. Solo existe cuando oscp>0 — no hay una "zona amarilla bajista"
+// separada, es la MISMA zona la que se usa en los dos sentidos.
+function dentroZonaAmarillaUnica(series, i){
+  const oscp = series.oscp[i], mt = series.maTrend[i];
+  if(isNaN(oscp) || isNaN(mt)) return false;
+  return oscp>0 && mt>0 && mt<oscp;
+}
+
+// La media ACABA DE ENTRAR en la zona (impulso alcista construyéndose) → señal de largo
+function entrandoZonaAmarillaUnica(series, i){
+  if(i<1) return false;
+  return dentroZonaAmarillaUnica(series, i) && !dentroZonaAmarillaUnica(series, i-1);
+}
+
+// La media ACABA DE SALIR de la zona POR ABAJO (cruzando de vuelta hacia/por debajo
+// de cero, no superando oscp por arriba) → el impulso alcista se agota, señal de corto
+function saliendoZonaAmarillaHaciaAbajo(series, i){
+  if(i<1) return false;
+  if(!dentroZonaAmarillaUnica(series, i-1)) return false; // tenía que estar dentro antes
+  const mt = series.maTrend[i];
+  if(isNaN(mt)) return false;
+  return mt<=0; // ahora ha cruzado por debajo del límite inferior de la zona (cero)
+}
+
 function bbwpAscendiendoYAlto(series, i, umbral, lookback){
   if(umbral==null) umbral = 45;
   if(lookback==null) lookback = 3;
@@ -3860,6 +3885,74 @@ async function main(){
     console.log('Ventanas con muestra suficiente: ' + ventanasConMuestraBH.map(r=>r.ventanaHoras+'h ('+r.winRateTotal.toFixed(1)+'%)').join(', '));
     console.log('Diferencia entre la más alta y la más baja: ' + diferencia.toFixed(1) + ' puntos → ' +
       (esEstable ? 'ESTABLE' : 'INESTABLE'));
+  }
+
+  // ---------- ANÁLISIS BI: corregido — zona amarilla ÚNICA (entrando=largo, saliendo hacia abajo=corto) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BI — Corregido: zona amarilla única del Koncorde (entrando=impulso alcista, saliendo hacia abajo=se agota)');
+  console.log('========================================');
+  console.log('15M (impulso): largo = dentro de la zona + AO Alcista + ADX subiendo + BBWP>50.');
+  console.log('               corto = saliendo de la zona hacia abajo + AO Bajista + ADX subiendo + BBWP>50.');
+  console.log('1H (retroceso, 2 condiciones): largo = entrando en la zona + BBWP acercándose a 50.');
+  console.log('                                corto = saliendo de la zona hacia abajo + BBWP acercándose a 50.');
+  console.log('Reutilizando los 48 meses de 15M ya descargados (' + s15MBH.n + ' velas).');
+
+  function impulso15M_BI(series, i, direction){
+    const koncordeOk = direction==='long' ? dentroZonaAmarillaUnica(series, i) : saliendoZonaAmarillaHaciaAbajo(series, i);
+    return koncordeOk
+      && (direction==='long' ? series.aoState[i]==='Alcista' : series.aoState[i]==='Bajista')
+      && series.adxSubiendo[i]
+      && series.bbwp[i]>50;
+  }
+  function retroceso1H_BI(j, direction){
+    const koncordeOk = direction==='long' ? entrandoZonaAmarillaUnica(s, j) : saliendoZonaAmarillaHaciaAbajo(s, j);
+    return koncordeOk && bbwpAcercandoseA(s, j, 50, 15, 3);
+  }
+  const idx1HPara15M_BI = alignDailyIndex(s, s15MBH.times);
+  function retrocesoRecienteEn1H_BI(i15M, direction, ventanaHoras){
+    const j = idx1HPara15M_BI[i15M];
+    if(j<0) return false;
+    const desde = Math.max(0, j - ventanaHoras);
+    for(let k=desde; k<=j; k++){ if(retroceso1H_BI(k, direction)) return true; }
+    return false;
+  }
+
+  const resumenBI = [4, 8, 12].map(ventanaHoras=>{
+    const dLargo = new Array(s15MBH.n).fill(false), dCorto = new Array(s15MBH.n).fill(false);
+    for(let i=0;i<s15MBH.n;i++){
+      if(impulso15M_BI(s15MBH,i,'long') && retrocesoRecienteEn1H_BI(i,'long',ventanaHoras)) dLargo[i]=true;
+      if(impulso15M_BI(s15MBH,i,'short') && retrocesoRecienteEn1H_BI(i,'short',ventanaHoras)) dCorto[i]=true;
+    }
+    const eLargo = evaluarIndicador(s15MBH, dLargo, 'long', TARGET_PCT, STOP_PCT, MAX_BARS);
+    const eCorto = evaluarIndicador(s15MBH, dCorto, 'short', TARGET_PCT, STOP_PCT, MAX_BARS);
+    const resueltosTotal = eLargo.resueltos + eCorto.resueltos;
+    const ganadasTotal = Math.round(eLargo.resueltos*(isNaN(eLargo.winRate)?0:eLargo.winRate)/100) + Math.round(eCorto.resueltos*(isNaN(eCorto.winRate)?0:eCorto.winRate)/100);
+    const winRateTotal = resueltosTotal>0 ? ganadasTotal/resueltosTotal*100 : NaN;
+    return { ventanaHoras, eLargo, eCorto, resueltosTotal, winRateTotal };
+  });
+
+  console.log('\n--- Diagnóstico por ventana (calculado, no leído a ojo) ---');
+  resumenBI.forEach(r=>{
+    const muestraOk = r.resueltosTotal >= UMBRAL_MUESTRA_MINIMA;
+    console.log('\nVentana ' + r.ventanaHoras + 'h: ' + r.resueltosTotal + ' operaciones resueltas en total (largo+corto) → ' +
+      (muestraOk ? 'MUESTRA SUFICIENTE' : 'MUESTRA INSUFICIENTE (mínimo recomendado: ' + UMBRAL_MUESTRA_MINIMA + ')'));
+    console.log('  % de acierto conjunto: ' + (isNaN(r.winRateTotal) ? '—' : r.winRateTotal.toFixed(1)+'%') +
+      ' (largo: ' + (isNaN(r.eLargo.winRate)?'—':r.eLargo.winRate.toFixed(1)+'%') + ' con ' + r.eLargo.resueltos + ' · corto: ' +
+      (isNaN(r.eCorto.winRate)?'—':r.eCorto.winRate.toFixed(1)+'%') + ' con ' + r.eCorto.resueltos + ')');
+  });
+
+  const ventanasConMuestraBI = resumenBI.filter(r=>r.resueltosTotal >= UMBRAL_MUESTRA_MINIMA && !isNaN(r.winRateTotal));
+  console.log('\n--- Conclusión automática ---');
+  if(ventanasConMuestraBI.length===0){
+    console.log('NINGUNA ventana alcanza la muestra mínima de ' + UMBRAL_MUESTRA_MINIMA + ' operaciones resueltas.');
+  } else if(ventanasConMuestraBI.length===1){
+    console.log('Solo la ventana de ' + ventanasConMuestraBI[0].ventanaHoras + 'h alcanza muestra suficiente (' + ventanasConMuestraBI[0].resueltosTotal + ' operaciones), con ' + ventanasConMuestraBI[0].winRateTotal.toFixed(1) + '% de acierto.');
+  } else {
+    const tasas = ventanasConMuestraBI.map(r=>r.winRateTotal);
+    const diferencia = Math.max(...tasas) - Math.min(...tasas);
+    const esEstable = diferencia <= UMBRAL_ESTABILIDAD_PUNTOS;
+    console.log('Ventanas con muestra suficiente: ' + ventanasConMuestraBI.map(r=>r.ventanaHoras+'h ('+r.winRateTotal.toFixed(1)+'%)').join(', '));
+    console.log('Diferencia entre la más alta y la más baja: ' + diferencia.toFixed(1) + ' puntos → ' + (esEstable ? 'ESTABLE' : 'INESTABLE'));
   }
 
   console.log('\n=== Fin del backtest ===');
