@@ -3740,6 +3740,57 @@ async function main(){
     console.log(pad('Corto',10) + padL(eCorto.disparos,10) + padL(eCorto.resueltos,11) + padL(isNaN(eCorto.winRate)?'—':eCorto.winRate.toFixed(1)+'%',11) + padL(isNaN(eCorto.mediaBarras)?'—':eCorto.mediaBarras.toFixed(1),13));
   });
 
+  // ---------- ANÁLISIS BG: comparación automática de las tres ventanas, con diagnóstico calculado (no leído a ojo) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BG — Comparación automática de las tres ventanas, con el diagnóstico ya calculado en el código');
+  console.log('========================================');
+  console.log('El propio análisis decide y declara si la muestra es suficiente y si el resultado es estable —');
+  console.log('no hace falta leer tablas sueltas ni comparar números a ojo.');
+
+  const UMBRAL_MUESTRA_MINIMA = 20; // operaciones resueltas (largo+corto juntas) para considerar la muestra fiable
+  const UMBRAL_ESTABILIDAD_PUNTOS = 15; // diferencia máxima de % de acierto entre ventanas para considerarlo estable
+
+  const resumenBG = [4, 8, 12].map(ventanaHoras=>{
+    const dLargo = new Array(s15MBD.n).fill(false), dCorto = new Array(s15MBD.n).fill(false);
+    for(let i=0;i<s15MBD.n;i++){
+      if(impulso15M(i,'long') && retrocesoRecienteEn1HVentana(i,'long',ventanaHoras)) dLargo[i]=true;
+      if(impulso15M(i,'short') && retrocesoRecienteEn1HVentana(i,'short',ventanaHoras)) dCorto[i]=true;
+    }
+    const eLargo = evaluarIndicador(s15MBD, dLargo, 'long', TARGET_PCT, STOP_PCT, MAX_BARS);
+    const eCorto = evaluarIndicador(s15MBD, dCorto, 'short', TARGET_PCT, STOP_PCT, MAX_BARS);
+    const resueltosTotal = eLargo.resueltos + eCorto.resueltos;
+    const ganadasTotal = Math.round(eLargo.resueltos*(isNaN(eLargo.winRate)?0:eLargo.winRate)/100) + Math.round(eCorto.resueltos*(isNaN(eCorto.winRate)?0:eCorto.winRate)/100);
+    const winRateTotal = resueltosTotal>0 ? ganadasTotal/resueltosTotal*100 : NaN;
+    return { ventanaHoras, eLargo, eCorto, resueltosTotal, winRateTotal };
+  });
+
+  console.log('\n--- Diagnóstico por ventana (calculado, no leído a ojo) ---');
+  resumenBG.forEach(r=>{
+    const muestraOk = r.resueltosTotal >= UMBRAL_MUESTRA_MINIMA;
+    console.log('\nVentana ' + r.ventanaHoras + 'h: ' + r.resueltosTotal + ' operaciones resueltas en total (largo+corto) → ' +
+      (muestraOk ? 'MUESTRA SUFICIENTE' : 'MUESTRA INSUFICIENTE (mínimo recomendado: ' + UMBRAL_MUESTRA_MINIMA + ')'));
+    console.log('  % de acierto conjunto: ' + (isNaN(r.winRateTotal) ? '—' : r.winRateTotal.toFixed(1)+'%') +
+      ' (largo: ' + (isNaN(r.eLargo.winRate)?'—':r.eLargo.winRate.toFixed(1)+'%') + ' con ' + r.eLargo.resueltos + ' · corto: ' +
+      (isNaN(r.eCorto.winRate)?'—':r.eCorto.winRate.toFixed(1)+'%') + ' con ' + r.eCorto.resueltos + ')');
+  });
+
+  const ventanasConMuestra = resumenBG.filter(r=>r.resueltosTotal >= UMBRAL_MUESTRA_MINIMA && !isNaN(r.winRateTotal));
+  console.log('\n--- Conclusión automática ---');
+  if(ventanasConMuestra.length===0){
+    console.log('NINGUNA ventana alcanza la muestra mínima de ' + UMBRAL_MUESTRA_MINIMA + ' operaciones resueltas.');
+    console.log('No se puede evaluar la estabilidad todavía — haría falta relajar más la definición o ampliar el histórico.');
+  } else if(ventanasConMuestra.length===1){
+    console.log('Solo la ventana de ' + ventanasConMuestra[0].ventanaHoras + 'h alcanza muestra suficiente (' + ventanasConMuestra[0].resueltosTotal + ' operaciones), con ' + ventanasConMuestra[0].winRateTotal.toFixed(1) + '% de acierto.');
+    console.log('No hay más de una ventana para comparar estabilidad todavía.');
+  } else {
+    const tasas = ventanasConMuestra.map(r=>r.winRateTotal);
+    const diferencia = Math.max(...tasas) - Math.min(...tasas);
+    const esEstable = diferencia <= UMBRAL_ESTABILIDAD_PUNTOS;
+    console.log('Ventanas con muestra suficiente: ' + ventanasConMuestra.map(r=>r.ventanaHoras+'h ('+r.winRateTotal.toFixed(1)+'%)').join(', '));
+    console.log('Diferencia entre la más alta y la más baja: ' + diferencia.toFixed(1) + ' puntos → ' +
+      (esEstable ? 'ESTABLE (por debajo del umbral de ' + UMBRAL_ESTABILIDAD_PUNTOS + ' puntos)' : 'INESTABLE (por encima del umbral de ' + UMBRAL_ESTABILIDAD_PUNTOS + ' puntos — el resultado cambia demasiado según la ventana elegida)'));
+  }
+
   console.log('\n=== Fin del backtest ===');
 }
 
