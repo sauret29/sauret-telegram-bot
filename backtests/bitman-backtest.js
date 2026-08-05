@@ -3428,6 +3428,46 @@ async function main(){
   console.log(pad('Resto del histórico',20) + padL(mAntesBA.trades,9) + padL(mAntesBA.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesBA.totalReturnPct),14) + padL('-'+mAntesBA.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesBA.profitFactor.toFixed(2),10));
   console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoBA.trades,9) + padL(mReservadoBA.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoBA.totalReturnPct),14) + padL('-'+mReservadoBA.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoBA.profitFactor.toFixed(2),10));
 
+  // ---------- ANÁLISIS BB: el mismo tamaño de posición variable, con BBWP≥50% en vez de BBWP≥90% ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BB — Tamaño de posición variable con BBWP≥50% (en vez de 90%) + ML RSI');
+  console.log('========================================');
+  console.log('Mismo mecanismo que el Análisis AZ/BA, cambiando solo el umbral de BBWP — un umbral más bajo');
+  console.log('significa que la condición "de calidad" se cumple con mucha más frecuencia (más operaciones');
+  console.log('reciben la fracción alta), lo que en principio debería suavizar el efecto, para bien o para mal.');
+
+  function fraccionSegunCombinacionUmbral(fraccionAlta, fraccionBaja, umbralBBWP){
+    return (i, direction) => {
+      const b = s4H.bbwp[i];
+      const mlOk = direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista';
+      const cumpleCombinacion = !isNaN(b) && b>=umbralBBWP && mlOk;
+      return cumpleCombinacion ? fraccionAlta : fraccionBaja;
+    };
+  }
+
+  // Primero, ¿a cuántas operaciones afecta el umbral más bajo? (para poner el resultado en contexto)
+  let cuentaUmbral50 = 0, cuentaUmbral90 = 0;
+  rBaseAZ.tradeLog.forEach(t=>{
+    const i = t.entryIdx;
+    const direction = (s4H.aoState[i]==='Alcista' && s4H.koBull[i]) ? 'long' : 'short';
+    const mlOk = direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista';
+    const b = s4H.bbwp[i];
+    if(!isNaN(b) && b>=50 && mlOk) cuentaUmbral50++;
+    if(!isNaN(b) && b>=90 && mlOk) cuentaUmbral90++;
+  });
+  console.log('\nOperaciones que reciben la fracción ALTA: con BBWP≥90 → ' + cuentaUmbral90 + ' de ' + rBaseAZ.trades + ' · con BBWP≥50 → ' + cuentaUmbral50 + ' de ' + rBaseAZ.trades);
+
+  console.log('\n' + pad('Reparto',16) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',14) + padL('Drawdown',11) + padL('P.Factor',10) + padL('Ret/DD',9));
+  console.log(pad('(fijo 12%, actual)',16) + padL(rBaseAZ.trades,9) + padL(rBaseAZ.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rBaseAZ.totalReturnPct),14) + padL('-'+rBaseAZ.maxDrawdownPct.toFixed(1)+'%',11) + padL(rBaseAZ.profitFactor.toFixed(2),10) + padL((rBaseAZ.totalReturnPct/rBaseAZ.maxDrawdownPct).toFixed(1),9));
+
+  repartos.forEach(([alta,baja])=>{
+    const fn = fraccionSegunCombinacionUmbral(alta/100, baja/100, 50);
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, undefined, undefined, undefined, fn);
+    console.log(pad(alta+'%/'+baja+'%',16) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),14) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10) + padL((r.totalReturnPct/r.maxDrawdownPct).toFixed(1),9));
+  });
+
+  console.log('\n(referencia, con BBWP≥90, Análisis AZ): 16/10 Ret/DD=67.7 · 20/8=71.6 · 24/6=72.9 · 30/4=69.2 · 40/2=53.9');
+
   console.log('\n=== Fin del backtest ===');
 }
 
