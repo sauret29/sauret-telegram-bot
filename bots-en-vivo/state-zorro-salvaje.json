@@ -3,5 +3,6 @@
   "entryPrice": null,
   "tpPrice": null,
   "entryTime": null,
-  "tpParcialHecho": false
+  "tpParcialHecho": false,
+  "lastProcessedTime": 1785931200000
 }
