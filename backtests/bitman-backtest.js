@@ -3791,6 +3791,77 @@ async function main(){
       (esEstable ? 'ESTABLE (por debajo del umbral de ' + UMBRAL_ESTABILIDAD_PUNTOS + ' puntos)' : 'INESTABLE (por encima del umbral de ' + UMBRAL_ESTABILIDAD_PUNTOS + ' puntos — el resultado cambia demasiado según la ventana elegida)'));
   }
 
+  // ---------- ANÁLISIS BH: retroceso en 1H con solo 2 condiciones (sin AO cerca de cero) + 48 meses de 15M ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BH — Retroceso en 1H con solo 2 condiciones (se quita el AO cerca de cero) + 48 meses de 15M');
+  console.log('========================================');
+  console.log('1H (retroceso, ahora con 2 condiciones en vez de 3): Koncorde entrando en la zona amarilla +');
+  console.log('BBWP acercándose a 50 desde abajo. 15M (impulso) se mantiene igual, con sus 3 condiciones.');
+
+  console.log('\nDescargando 48 meses de velas de 15M (el doble que antes)...');
+  const ohlcv15MBH = await fetchCandlesForMonths('15m', 48, 300);
+  const s15MBH = computeFullSeries(ohlcv15MBH);
+  console.log('Velas 15M: ' + s15MBH.n + ' (antes, con 24 meses: ' + s15MBD.n + ')');
+
+  function impulso15M_BH(series, i, direction){
+    return dentroZonaAmarilla(series, i, direction)
+      && (direction==='long' ? series.aoState[i]==='Alcista' : series.aoState[i]==='Bajista')
+      && series.adxSubiendo[i]
+      && series.bbwp[i]>50;
+  }
+  function retroceso1H_2cond(j, direction){
+    return entrandoZonaAmarilla(s, j, direction)
+      && bbwpAcercandoseA(s, j, 50, 15, 3);
+  }
+  const idx1HPara15M_BH = alignDailyIndex(s, s15MBH.times);
+  function retrocesoRecienteEn1H_2cond(i15M, direction, ventanaHoras){
+    const j = idx1HPara15M_BH[i15M];
+    if(j<0) return false;
+    const desde = Math.max(0, j - ventanaHoras);
+    for(let k=desde; k<=j; k++){ if(retroceso1H_2cond(k, direction)) return true; }
+    return false;
+  }
+
+  const resumenBH = [4, 8, 12].map(ventanaHoras=>{
+    const dLargo = new Array(s15MBH.n).fill(false), dCorto = new Array(s15MBH.n).fill(false);
+    for(let i=0;i<s15MBH.n;i++){
+      if(impulso15M_BH(s15MBH,i,'long') && retrocesoRecienteEn1H_2cond(i,'long',ventanaHoras)) dLargo[i]=true;
+      if(impulso15M_BH(s15MBH,i,'short') && retrocesoRecienteEn1H_2cond(i,'short',ventanaHoras)) dCorto[i]=true;
+    }
+    const eLargo = evaluarIndicador(s15MBH, dLargo, 'long', TARGET_PCT, STOP_PCT, MAX_BARS);
+    const eCorto = evaluarIndicador(s15MBH, dCorto, 'short', TARGET_PCT, STOP_PCT, MAX_BARS);
+    const resueltosTotal = eLargo.resueltos + eCorto.resueltos;
+    const ganadasTotal = Math.round(eLargo.resueltos*(isNaN(eLargo.winRate)?0:eLargo.winRate)/100) + Math.round(eCorto.resueltos*(isNaN(eCorto.winRate)?0:eCorto.winRate)/100);
+    const winRateTotal = resueltosTotal>0 ? ganadasTotal/resueltosTotal*100 : NaN;
+    return { ventanaHoras, eLargo, eCorto, resueltosTotal, winRateTotal };
+  });
+
+  console.log('\n--- Diagnóstico por ventana (calculado, no leído a ojo) ---');
+  resumenBH.forEach(r=>{
+    const muestraOk = r.resueltosTotal >= UMBRAL_MUESTRA_MINIMA;
+    console.log('\nVentana ' + r.ventanaHoras + 'h: ' + r.resueltosTotal + ' operaciones resueltas en total (largo+corto) → ' +
+      (muestraOk ? 'MUESTRA SUFICIENTE' : 'MUESTRA INSUFICIENTE (mínimo recomendado: ' + UMBRAL_MUESTRA_MINIMA + ')'));
+    console.log('  % de acierto conjunto: ' + (isNaN(r.winRateTotal) ? '—' : r.winRateTotal.toFixed(1)+'%') +
+      ' (largo: ' + (isNaN(r.eLargo.winRate)?'—':r.eLargo.winRate.toFixed(1)+'%') + ' con ' + r.eLargo.resueltos + ' · corto: ' +
+      (isNaN(r.eCorto.winRate)?'—':r.eCorto.winRate.toFixed(1)+'%') + ' con ' + r.eCorto.resueltos + ')');
+  });
+
+  const ventanasConMuestraBH = resumenBH.filter(r=>r.resueltosTotal >= UMBRAL_MUESTRA_MINIMA && !isNaN(r.winRateTotal));
+  console.log('\n--- Conclusión automática ---');
+  if(ventanasConMuestraBH.length===0){
+    console.log('NINGUNA ventana alcanza la muestra mínima de ' + UMBRAL_MUESTRA_MINIMA + ' operaciones resueltas.');
+    console.log('Ni relajando a 2 condiciones en 1H ni ampliando a 48 meses fue suficiente — haría falta relajar también el 15M.');
+  } else if(ventanasConMuestraBH.length===1){
+    console.log('Solo la ventana de ' + ventanasConMuestraBH[0].ventanaHoras + 'h alcanza muestra suficiente (' + ventanasConMuestraBH[0].resueltosTotal + ' operaciones), con ' + ventanasConMuestraBH[0].winRateTotal.toFixed(1) + '% de acierto.');
+  } else {
+    const tasas = ventanasConMuestraBH.map(r=>r.winRateTotal);
+    const diferencia = Math.max(...tasas) - Math.min(...tasas);
+    const esEstable = diferencia <= UMBRAL_ESTABILIDAD_PUNTOS;
+    console.log('Ventanas con muestra suficiente: ' + ventanasConMuestraBH.map(r=>r.ventanaHoras+'h ('+r.winRateTotal.toFixed(1)+'%)').join(', '));
+    console.log('Diferencia entre la más alta y la más baja: ' + diferencia.toFixed(1) + ' puntos → ' +
+      (esEstable ? 'ESTABLE' : 'INESTABLE'));
+  }
+
   console.log('\n=== Fin del backtest ===');
 }
 
