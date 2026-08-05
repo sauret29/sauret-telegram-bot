@@ -3710,6 +3710,36 @@ async function main(){
   console.log(pad('Corto',10) + padL(evalCorto.disparos,10) + padL(evalCorto.resueltos,11) + padL(isNaN(evalCorto.winRate)?'—':evalCorto.winRate.toFixed(1)+'%',11) + padL(isNaN(evalCorto.mediaBarras)?'—':evalCorto.mediaBarras.toFixed(1),13));
   console.log('\n(referencia: 50% es el punto de equilibrio; comparar contra los indicadores sueltos del Análisis BD)');
 
+  // ---------- ANÁLISIS BF: ampliar la ventana del retroceso en 1H (4h → 8h → 12h) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BF — Misma señal combinada, ampliando la ventana del retroceso en 1H (para conseguir muestra)');
+  console.log('========================================');
+  console.log('Con 4 horas de ventana solo había 7 disparos largos y 4 cortos — insuficiente para confiar en');
+  console.log('el resultado. Se prueba con 8 y 12 horas, para ver cuánto crece la muestra y si el % de acierto');
+  console.log('se mantiene parecido o cambia mucho al tener más casos.');
+
+  function retrocesoRecienteEn1HVentana(i15M, direction, ventanaHoras){
+    const j = idx1HPara15M[i15M];
+    if(j<0) return false;
+    const desde = Math.max(0, j - ventanaHoras);
+    for(let k=desde; k<=j; k++){ if(retroceso1H(k, direction)) return true; }
+    return false;
+  }
+
+  [4, 8, 12].forEach(ventanaHoras=>{
+    const dLargo = new Array(s15MBD.n).fill(false), dCorto = new Array(s15MBD.n).fill(false);
+    for(let i=0;i<s15MBD.n;i++){
+      if(impulso15M(i,'long') && retrocesoRecienteEn1HVentana(i,'long',ventanaHoras)) dLargo[i]=true;
+      if(impulso15M(i,'short') && retrocesoRecienteEn1HVentana(i,'short',ventanaHoras)) dCorto[i]=true;
+    }
+    const eLargo = evaluarIndicador(s15MBD, dLargo, 'long', TARGET_PCT, STOP_PCT, MAX_BARS);
+    const eCorto = evaluarIndicador(s15MBD, dCorto, 'short', TARGET_PCT, STOP_PCT, MAX_BARS);
+    console.log('\n--- Ventana de ' + ventanaHoras + ' horas ---');
+    console.log(pad('Dirección',10) + padL('Disparos',10) + padL('Resueltos',11) + padL('% Acierto',11) + padL('Velas medias',13));
+    console.log(pad('Largo',10) + padL(eLargo.disparos,10) + padL(eLargo.resueltos,11) + padL(isNaN(eLargo.winRate)?'—':eLargo.winRate.toFixed(1)+'%',11) + padL(isNaN(eLargo.mediaBarras)?'—':eLargo.mediaBarras.toFixed(1),13));
+    console.log(pad('Corto',10) + padL(eCorto.disparos,10) + padL(eCorto.resueltos,11) + padL(isNaN(eCorto.winRate)?'—':eCorto.winRate.toFixed(1)+'%',11) + padL(isNaN(eCorto.mediaBarras)?'—':eCorto.mediaBarras.toFixed(1),13));
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
