@@ -56,7 +56,7 @@ async function fetchKlinesRaw(interval, limit, endTime){
 // con menos historial del que tendría en una situación real.
 async function fetchCandlesForMonths(interval, months, warmupMargin){
   if(warmupMargin==null) warmupMargin = 3050; // por defecto, margen para el ML RSI (solo se usa en 1H)
-  const msPerCandle = { '15m': 900000, '30m': 1800000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[interval] || 3600000;
+  const msPerCandle = { '15m': 900000, '30m': 1800000, '1h': 3600000, '4h': 14400000, '1d': 86400000, '1w': 604800000 }[interval] || 3600000;
   const monthsCandles = Math.ceil((months * 30 * 86400000) / msPerCandle);
   const targetCandles = monthsCandles + warmupMargin;
   let all = await fetchKlinesRaw(interval, SIGNAL_LIMIT);
@@ -3214,6 +3214,99 @@ async function main(){
   console.log(pad('Grupo',20)+padL('Operac.',9)+padL('% Acierto',11)+padL('Retorno',14)+padL('P.Factor',10));
   console.log(pad('Con la combinación',20)+padL(mConComb.trades,9)+padL(mConComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mConComb.totalReturnPct),14)+padL(mConComb.profitFactor.toFixed(2),10));
   console.log(pad('Sin la combinación',20)+padL(mSinComb.trades,9)+padL(mSinComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mSinComb.totalReturnPct),14)+padL(mSinComb.profitFactor.toFixed(2),10));
+
+  // ---------- ANÁLISIS AW: filtro real de la combinación BBWP≥90 + ML RSI sobre la 20/80 REAL ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AW — Filtro real de BBWP≥90 + ML RSI coincide sobre la 20/80 real (mismo rigor que AF/AK/AN)');
+  console.log('========================================');
+  console.log('El hallazgo del Análisis AV se midió sobre el trailing -1.0%, no sobre la 20/80 real del bot.');
+  console.log('Aquí se prueba la MISMA combinación como filtro real de entrada, sobre la configuración validada.');
+
+  const filtroCombinado = (i, direction) => {
+    const b = s4H.bbwp[i];
+    if(isNaN(b)) return true;
+    const mlOk = direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista';
+    return b>=90 && mlOk;
+  };
+
+  const rSinFiltroComb = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  const rConFiltroComb = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, filtroCombinado);
+
+  console.log('\n--- Comparación directa (20/80, 12% capital, 5x) ---');
+  console.log(pad('Variante',24)+padL('Operac.',9)+padL('% Acierto',11)+padL('Retorno',12)+padL('Drawdown',11)+padL('P.Factor',10));
+  console.log(pad('Sin filtro combinado',24)+padL(rSinFiltroComb.trades,9)+padL(rSinFiltroComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(rSinFiltroComb.totalReturnPct),12)+padL('-'+rSinFiltroComb.maxDrawdownPct.toFixed(1)+'%',11)+padL(rSinFiltroComb.profitFactor.toFixed(2),10));
+  console.log(pad('Con filtro combinado',24)+padL(rConFiltroComb.trades,9)+padL(rConFiltroComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(rConFiltroComb.totalReturnPct),12)+padL('-'+rConFiltroComb.maxDrawdownPct.toFixed(1)+'%',11)+padL(rConFiltroComb.profitFactor.toFixed(2),10));
+
+  console.log('\n--- Walk-forward año por año, CON el filtro combinado ---');
+  console.log(pad('Año',8)+padL('Operac.',9)+padL('% Acierto',11)+padL('Retorno',12)+padL('Drawdown',11)+padL('P.Factor',10));
+  const bucketsComb = {};
+  rConFiltroComb.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!bucketsComb[year]) bucketsComb[year] = [];
+    bucketsComb[year].push(t);
+  });
+  let aniosPositivosComb=0, aniosTotalComb=0;
+  Object.keys(bucketsComb).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(bucketsComb[year]);
+    console.log(pad(String(year),8)+padL(m.trades,9)+padL(m.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(m.totalReturnPct),12)+padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11)+padL(m.profitFactor.toFixed(2),10));
+    aniosTotalComb++;
+    if(m.totalReturnPct>0) aniosPositivosComb++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivosComb + ' de ' + aniosTotalComb);
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados ---');
+  const cutoffReservadoComb = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntesComb = rConFiltroComb.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservadoComb);
+  const tradesReservadoComb = rConFiltroComb.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservadoComb);
+  const mAntesComb = metricsForTradeSubset(tradesAntesComb);
+  const mReservadoComb = metricsForTradeSubset(tradesReservadoComb);
+  console.log(pad('Tramo',20)+padL('Operac.',9)+padL('% Acierto',11)+padL('Retorno',12)+padL('Drawdown',11)+padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20)+padL(mAntesComb.trades,9)+padL(mAntesComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mAntesComb.totalReturnPct),12)+padL('-'+mAntesComb.maxDrawdownPct.toFixed(1)+'%',11)+padL(mAntesComb.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20)+padL(mReservadoComb.trades,9)+padL(mReservadoComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mReservadoComb.totalReturnPct),12)+padL('-'+mReservadoComb.maxDrawdownPct.toFixed(1)+'%',11)+padL(mReservadoComb.profitFactor.toFixed(2),10));
+
+  // ---------- ANÁLISIS AX: ¿había también confluencia en el SEMANAL en las operaciones excepcionales? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AX — ¿Coincidía también el SEMANAL (AO+Koncorde) en las operaciones excepcionales, más que en el resto?');
+  console.log('========================================');
+  console.log('El Diario ya coincide siempre con el 4H (es requisito de entrada del propio bot). El Semanal NO');
+  console.log('se comprueba nunca en la Confluencia actual — aquí se calcula por primera vez, para ver si las');
+  console.log('operaciones excepcionales tenían, además, ese nivel extra de confirmación que el resto no tenía.');
+
+  console.log('\nDescargando velas semanales (nunca usadas hasta ahora)...');
+  const ohlcvSemanal = await fetchCandlesForMonths('1w', MESES_HISTORICO, 60);
+  const sSemanal = computeFullSeries(ohlcvSemanal);
+  console.log('Velas semanales: ' + sSemanal.n);
+
+  const idxSemanalPara4H = alignDailyIndex(sSemanal, s4H.times);
+
+  function semanalCoincide(entryIdx, direction){
+    const iSem = idxSemanalPara4H[entryIdx];
+    if(iSem<0) return false;
+    return direction==='long'
+      ? (sSemanal.aoState[iSem]==='Alcista' && sSemanal.koBull[iSem])
+      : (sSemanal.aoState[iSem]==='Bajista' && sSemanal.koBear[iSem]);
+  }
+
+  const perfilConSemanal = rTrail10.tradeLog.map(t=>{
+    const i = t.entryIdx;
+    const direction = (s4H.aoState[i]==='Alcista' && s4H.koBull[i]) ? 'long' : 'short';
+    return { equityChangePct:t.equityChangePct, direction, semanalCoincide: semanalCoincide(i, direction) };
+  });
+
+  const excepcionalesSem = perfilConSemanal.filter(o=>o.equityChangePct>=3);
+  const restoSem = perfilConSemanal.filter(o=>o.equityChangePct<3);
+
+  const pctExcConSemanal = excepcionalesSem.filter(o=>o.semanalCoincide).length / excepcionalesSem.length * 100;
+  const pctRestoConSemanal = restoSem.filter(o=>o.semanalCoincide).length / restoSem.length * 100;
+
+  console.log('\n--- ¿Cuántas tenían también el semanal a favor? ---');
+  console.log('Excepcionales (' + excepcionalesSem.length + '): ' + excepcionalesSem.filter(o=>o.semanalCoincide).length + ' con semanal a favor (' + pctExcConSemanal.toFixed(1) + '%)');
+  console.log('Resto (' + restoSem.length + '): ' + restoSem.filter(o=>o.semanalCoincide).length + ' con semanal a favor (' + pctRestoConSemanal.toFixed(1) + '%)');
+
+  console.log('\n--- Detalle: de las excepcionales, ¿cuáles tenían el semanal a favor y cuáles no? ---');
+  excepcionalesSem.forEach((o,idx)=>{
+    console.log('  #' + (idx+1) + ' (' + (o.direction==='long'?'COMPRA':'VENTA') + ', +' + o.equityChangePct.toFixed(1) + '%): semanal ' + (o.semanalCoincide?'SÍ coincidía':'no coincidía'));
+  });
 
   console.log('\n=== Fin del backtest ===');
 }
