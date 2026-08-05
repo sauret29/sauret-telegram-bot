@@ -3978,6 +3978,401 @@ async function main(){
     });
   });
 
+
+  // ============================================================
+  // ANÁLISIS BK — Embudo de atrición: dónde se pierde exactamente la muestra
+  // ============================================================
+  // No se mueve ninguna ventana (eso ya está descartado). Se cuenta, sobre TODAS
+  // las velas de 15M descargadas, cuántas pasan cada condición POR SEPARADO y
+  // cuántas sobreviven ACUMULADAS en orden. La condición con la peor retención es
+  // la que mata el proyecto. Se usa la definición vigente de la señal (la corregida
+  // en BI) y la ventana de 1H más laxa de las probadas (12h), para medir el MEJOR
+  // caso posible, no el peor.
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BK — Embudo de atrición: dónde se pierde la muestra, condición por condición');
+  console.log('========================================');
+
+  const UMBRAL_MUESTRA_PROYECTO = 100; // operaciones resueltas exigidas por las instrucciones del proyecto
+  const VENTANA_1H_BK = 12;            // la ventana más laxa de las ya probadas: mejor caso posible
+
+  // --- Cobertura temporal de cada serie (esto se imprime ANTES que nada) ---
+  const isoDia = ms => new Date(ms).toISOString().slice(0,10);
+  const mesesEntre = (a,b) => (b-a)/(30*86400000);
+  const cobertura1HVelas = idx1HPara15M_BI.reduce((acc,j)=>acc+(j>=0?1:0), 0);
+  const pctCobertura1H = s15MBH.n>0 ? cobertura1HVelas/s15MBH.n*100 : NaN;
+
+  console.log('\n--- Cobertura temporal de las series (condición previa a todo lo demás) ---');
+  console.log('Serie 15M : ' + s15MBH.n + ' velas · ' + isoDia(s15MBH.times[0]) + ' → ' + isoDia(s15MBH.times[s15MBH.n-1]) +
+    ' (' + mesesEntre(s15MBH.times[0], s15MBH.times[s15MBH.n-1]).toFixed(1) + ' meses)');
+  console.log('Serie 1H  : ' + s.n + ' velas · ' + isoDia(s.times[0]) + ' → ' + isoDia(s.times[s.n-1]) +
+    ' (' + mesesEntre(s.times[0], s.times[s.n-1]).toFixed(1) + ' meses)');
+  console.log('Velas de 15M que tienen una vela de 1H disponible para confirmar: ' + cobertura1HVelas +
+    ' de ' + s15MBH.n + ' (' + pctCobertura1H.toFixed(1) + '%)');
+  if(pctCobertura1H < 99){
+    console.log('AVISO: la serie de 1H NO cubre todo el histórico de 15M. Para las velas fuera de cobertura la');
+    console.log('confirmación de 1H es imposible por construcción, no por criterio de mercado. Ese porcentaje es');
+    console.log('un tope estructural de la muestra, independiente de lo buena o mala que sea la señal.');
+  }
+
+  // --- Definición de las condiciones atómicas, en el orden en que se aplican ---
+  const condicionesBK = {
+    long: [
+      { nombre: 'Koncorde 15M: dentro zona amarilla',   test: i => dentroZonaAmarillaUnica(s15MBH, i) },
+      { nombre: 'AO 15M: estado Alcista',               test: i => s15MBH.aoState[i] === 'Alcista' },
+      { nombre: 'ADX 15M: subiendo',                    test: i => s15MBH.adxSubiendo[i] },
+      { nombre: 'BBWP 15M: > 50',                       test: i => s15MBH.bbwp[i] > 50 },
+      { nombre: 'Existe vela de 1H en esa fecha',       test: i => idx1HPara15M_BI[i] >= 0 },
+      { nombre: 'Confirmación 1H (' + VENTANA_1H_BK + 'h)', test: i => retrocesoRecienteEn1H_BI(i, 'long', VENTANA_1H_BK) }
+    ],
+    short: [
+      { nombre: 'Koncorde 15M: saliendo zona por abajo', test: i => saliendoZonaAmarillaHaciaAbajo(s15MBH, i) },
+      { nombre: 'AO 15M: estado Bajista',               test: i => s15MBH.aoState[i] === 'Bajista' },
+      { nombre: 'ADX 15M: subiendo',                    test: i => s15MBH.adxSubiendo[i] },
+      { nombre: 'BBWP 15M: > 50',                       test: i => s15MBH.bbwp[i] > 50 },
+      { nombre: 'Existe vela de 1H en esa fecha',       test: i => idx1HPara15M_BI[i] >= 0 },
+      { nombre: 'Confirmación 1H (' + VENTANA_1H_BK + 'h)', test: i => retrocesoRecienteEn1H_BI(i, 'short', VENTANA_1H_BK) }
+    ]
+  };
+
+  const IDX_ULTIMA_COND_15M_BK = 3; // índice de 'BBWP 15M: > 50' — último escalón que no depende del 1H
+
+  function embudoBK(direction){
+    const conds = condicionesBK[direction];
+    const nTot = s15MBH.n;
+
+    // Paso 1: cuántas velas pasan cada condición POR SEPARADO (independientes entre sí)
+    const sueltas = conds.map(() => 0);
+    for(let c=0; c<conds.length; c++){
+      const test = conds[c].test;
+      for(let i=0; i<nTot; i++) if(test(i)) sueltas[c]++;
+    }
+
+    // Paso 2: supervivientes ACUMULADAS aplicando las condiciones en orden
+    let vivos = new Array(nTot).fill(true);
+    const acumuladas = [];
+    let vivosTras15M = null;
+    conds.forEach((cond, c) => {
+      const siguiente = new Array(nTot).fill(false);
+      let cuenta = 0;
+      for(let i=0; i<nTot; i++){
+        if(vivos[i] && cond.test(i)){ siguiente[i] = true; cuenta++; }
+      }
+      vivos = siguiente;
+      acumuladas.push(cuenta);
+      if(c === IDX_ULTIMA_COND_15M_BK) vivosTras15M = vivos.slice();
+    });
+
+    // Paso 3: último escalón del embudo — que la carrera ±2% llegue a resolverse
+    const resultados = carreraHaciaObjetivo(s15MBH, vivos, direction, TARGET_PCT, STOP_PCT, MAX_BARS);
+    const resueltos = resultados.filter(r => r.resultado !== null);
+    const ganadas = resueltos.filter(r => r.resultado === true).length;
+
+    // Referencia: el mismo embudo cortado antes del 1H (techo si el 1H no cortara nada)
+    const resultadosSin1H = carreraHaciaObjetivo(s15MBH, vivosTras15M, direction, TARGET_PCT, STOP_PCT, MAX_BARS);
+    const resueltosSin1H = resultadosSin1H.filter(r => r.resultado !== null).length;
+
+    return {
+      direction, conds, sueltas, acumuladas,
+      disparos: resultados.length,
+      resueltos: resueltos.length,
+      ganadas,
+      winRate: resueltos.length ? ganadas/resueltos.length*100 : NaN,
+      resultados,
+      disparosSin1H: resultadosSin1H.length,
+      resueltosSin1H
+    };
+  }
+
+  function imprimirEmbudoBK(res){
+    const nTot = s15MBH.n;
+    console.log('\n--- Embudo ' + (res.direction === 'long' ? 'LARGO' : 'CORTO') + ' (total de velas de 15M: ' + nTot + ') ---');
+    console.log(pad('Condición', 38) + padL('Pasan', 10) + padL('% total', 10) + padL('Superviv.', 11) + padL('% del ant.', 12));
+    let anterior = nTot;
+    res.conds.forEach((cond, c) => {
+      const sup = res.acumuladas[c];
+      const pctTotal = nTot > 0 ? res.sueltas[c]/nTot*100 : NaN;
+      const pctAnterior = anterior > 0 ? sup/anterior*100 : NaN;
+      console.log(pad(cond.nombre, 38) + padL(res.sueltas[c], 10) + padL(pctTotal.toFixed(2)+'%', 10) +
+        padL(sup, 11) + padL(isNaN(pctAnterior) ? '—' : pctAnterior.toFixed(1)+'%', 12));
+      anterior = sup;
+    });
+    const pctResueltas = res.disparos > 0 ? res.resueltos/res.disparos*100 : NaN;
+    console.log(pad('Carrera ±' + TARGET_PCT + '% resuelta en ' + MAX_BARS + ' velas', 38) + padL('—', 10) + padL('—', 10) +
+      padL(res.resueltos, 11) + padL(isNaN(pctResueltas) ? '—' : pctResueltas.toFixed(1)+'%', 12));
+    console.log('Referencia sin el filtro de 1H: ' + res.disparosSin1H + ' disparos → ' + res.resueltosSin1H + ' resueltas.');
+  }
+
+  // --- Localiza el escalón con peor retención (el que "mata" el embudo) ---
+  function peorEscalonBK(res){
+    const nTot = s15MBH.n;
+    let anterior = nTot, peor = null;
+    res.conds.forEach((cond, c) => {
+      const sup = res.acumuladas[c];
+      const ratio = anterior > 0 ? sup/anterior : 1;
+      if(peor === null || ratio < peor.ratio) peor = { nombre: cond.nombre, ratio, sup, anterior };
+      anterior = sup;
+    });
+    const ratioResolucion = res.disparos > 0 ? res.resueltos/res.disparos : 1;
+    if(res.disparos > 0 && ratioResolucion < peor.ratio){
+      peor = { nombre: 'Carrera ±' + TARGET_PCT + '% resuelta en ' + MAX_BARS + ' velas', ratio: ratioResolucion, sup: res.resueltos, anterior: res.disparos };
+    }
+    return peor;
+  }
+
+  const embudoLargoBK = embudoBK('long');
+  const embudoCortoBK = embudoBK('short');
+  imprimirEmbudoBK(embudoLargoBK);
+  imprimirEmbudoBK(embudoCortoBK);
+
+  // --- Desglose por año ---
+  function desglosePorAnioBK(res){
+    const porAnio = new Map();
+    for(let i=0; i<s15MBH.n; i++){
+      const anio = new Date(s15MBH.times[i]).getUTCFullYear();
+      if(!porAnio.has(anio)) porAnio.set(anio, { velas:0, con1H:0, disparos:0, resueltos:0, ganadas:0 });
+      const e = porAnio.get(anio);
+      e.velas++;
+      if(idx1HPara15M_BI[i] >= 0) e.con1H++;
+    }
+    res.resultados.forEach(r => {
+      const anio = new Date(s15MBH.times[r.entryIdx]).getUTCFullYear();
+      const e = porAnio.get(anio);
+      if(!e) return;
+      e.disparos++;
+      if(r.resultado !== null){ e.resueltos++; if(r.resultado === true) e.ganadas++; }
+    });
+    return porAnio;
+  }
+
+  console.log('\n--- Desglose por año (largo + corto juntos) ---');
+  const anioLargoBK = desglosePorAnioBK(embudoLargoBK);
+  const anioCortoBK = desglosePorAnioBK(embudoCortoBK);
+  const aniosBK = Array.from(new Set([...anioLargoBK.keys(), ...anioCortoBK.keys()])).sort((a,b)=>a-b);
+  console.log(pad('Año', 8) + padL('Velas 15M', 11) + padL('Con 1H', 10) + padL('% con 1H', 10) + padL('Disparos', 10) + padL('Resueltas', 11) + padL('% acierto', 11));
+  aniosBK.forEach(anio => {
+    const a = anioLargoBK.get(anio) || { velas:0, con1H:0, disparos:0, resueltos:0, ganadas:0 };
+    const b = anioCortoBK.get(anio) || { velas:0, con1H:0, disparos:0, resueltos:0, ganadas:0 };
+    const disparos = a.disparos + b.disparos;
+    const resueltos = a.resueltos + b.resueltos;
+    const ganadas = a.ganadas + b.ganadas;
+    const pctCon1H = a.velas > 0 ? a.con1H/a.velas*100 : NaN;
+    const winRate = resueltos > 0 ? ganadas/resueltos*100 : NaN;
+    console.log(pad(anio, 8) + padL(a.velas, 11) + padL(a.con1H, 10) + padL(isNaN(pctCon1H)?'—':pctCon1H.toFixed(0)+'%', 10) +
+      padL(disparos, 10) + padL(resueltos, 11) + padL(isNaN(winRate)?'—':winRate.toFixed(1)+'%', 11));
+  });
+
+  // --- Conclusión automática de BK (la emite el script, no se lee la tabla a ojo) ---
+  const resueltosTotalBK = embudoLargoBK.resueltos + embudoCortoBK.resueltos;
+  const resueltosSin1HBK = embudoLargoBK.resueltosSin1H + embudoCortoBK.resueltosSin1H;
+  const peorLargoBK = peorEscalonBK(embudoLargoBK);
+  const peorCortoBK = peorEscalonBK(embudoCortoBK);
+
+  console.log('\n--- Conclusión automática (BK) ---');
+  console.log('TAMAÑO DE MUESTRA PRIMERO: ' + resueltosTotalBK + ' operaciones resueltas (largo+corto) sobre ' +
+    s15MBH.n + ' velas de 15M.');
+  if(resueltosTotalBK < UMBRAL_MUESTRA_PROYECTO){
+    console.log('→ MUESTRA INSUFICIENTE (mínimo del proyecto: ' + UMBRAL_MUESTRA_PROYECTO + '). No se interpreta ningún');
+    console.log('  resultado de rendimiento de esta configuración. Solo se diagnostica dónde se pierde la muestra.');
+  } else {
+    console.log('→ MUESTRA SUFICIENTE (mínimo del proyecto: ' + UMBRAL_MUESTRA_PROYECTO + '). El rendimiento sí es interpretable.');
+  }
+  console.log('Escalón que más corta en LARGO: "' + peorLargoBK.nombre + '" → deja pasar el ' +
+    (peorLargoBK.ratio*100).toFixed(1) + '% (' + peorLargoBK.anterior + ' → ' + peorLargoBK.sup + ').');
+  console.log('Escalón que más corta en CORTO: "' + peorCortoBK.nombre + '" → deja pasar el ' +
+    (peorCortoBK.ratio*100).toFixed(1) + '% (' + peorCortoBK.anterior + ' → ' + peorCortoBK.sup + ').');
+  console.log('Techo si el filtro de 1H no cortara absolutamente nada: ' + resueltosSin1HBK + ' operaciones resueltas.');
+  if(resueltosSin1HBK < UMBRAL_MUESTRA_PROYECTO){
+    console.log('→ CONCLUSIÓN: el 1H NO es el cuello de botella. Ni eliminándolo por completo se llega a ' +
+      UMBRAL_MUESTRA_PROYECTO + '.');
+    console.log('  El problema está en las condiciones de 15M, no en la confirmación. Quitar el 1H no arregla nada.');
+  } else {
+    console.log('→ CONCLUSIÓN: el filtro de 1H SÍ es el cuello de botella. Sin él la muestra pasa de ' +
+      resueltosTotalBK + ' a ' + resueltosSin1HBK + ' operaciones resueltas, por encima del mínimo de ' +
+      UMBRAL_MUESTRA_PROYECTO + '. El 1H debería usarse para modular tamaño, no para cortar entradas.');
+  }
+  if(pctCobertura1H < 99){
+    console.log('AVISO REPETIDO: solo el ' + pctCobertura1H.toFixed(1) + '% de las velas de 15M tenía 1H disponible. Parte de');
+    console.log('la atrición atribuida al 1H es falta de datos, no criterio. Comparar con BO antes de decidir nada.');
+  }
+
+  // ============================================================
+  // ANÁLISIS BO — Techo de histórico: cuánta muestra es alcanzable como máximo
+  // ============================================================
+  // Descarga el máximo de velas de 15M que la API permite, mide desde qué fecha
+  // llega, y calcula cuántas operaciones resueltas dan las condiciones de 15M
+  // SIN ningún filtro de 1H. Ese número es el techo absoluto del concepto.
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BO — Techo de histórico: máximo de velas de 15M descargables y máximo de muestra alcanzable');
+  console.log('========================================');
+
+  const MAX_PAGINAS_BO = 500; // 500 páginas × 1000 velas = 500.000 velas de 15M ≈ 14 años
+
+  async function descargarTodoElHistoricoBO(interval, maxPaginas){
+    const primera = await fetchKlinesRaw(interval, SIGNAL_LIMIT);
+    const paginasDatos = [primera];
+    let masAntiguo = primera[0][0];
+    let paginas = 1;
+    let motivoParada = 'límite de páginas del script alcanzado (' + maxPaginas + ')';
+    let finDeHistorico = false;
+    while(paginas < maxPaginas){
+      let pagina;
+      try{ pagina = await fetchKlinesRaw(interval, SIGNAL_LIMIT, masAntiguo - 1); }
+      catch(e){
+        // 'Respuesta vacía' en TODOS los hosts = no hay más velas antiguas (fin real del histórico).
+        // Cualquier otro error (HTTP, red, rate limit) = corte técnico, NO es el techo de datos.
+        if(/Respuesta vacía/.test(e.message)){ motivoParada = 'todos los hosts devolvieron vacío (fin del histórico)'; finDeHistorico = true; }
+        else { motivoParada = 'CORTE TÉCNICO, no fin de histórico: ' + e.message; }
+        break;
+      }
+      if(!pagina || pagina.length === 0){ motivoParada = 'la API devolvió una página vacía (fin del histórico)'; finDeHistorico = true; break; }
+      const nuevas = pagina.filter(k => k[0] < masAntiguo);
+      if(nuevas.length === 0){ motivoParada = 'la API dejó de devolver velas más antiguas (fin del histórico)'; finDeHistorico = true; break; }
+      paginasDatos.unshift(nuevas);
+      masAntiguo = nuevas[0][0];
+      paginas++;
+      if(paginas % 50 === 0) console.log('  ... ' + paginas + ' páginas descargadas, llegando hasta ' + new Date(masAntiguo).toISOString().slice(0,10));
+      if(pagina.length < SIGNAL_LIMIT){ motivoParada = 'la API devolvió una página incompleta (fin del histórico)'; finDeHistorico = true; break; }
+    }
+    const map = new Map();
+    paginasDatos.forEach(p => p.forEach(k => map.set(k[0], k)));
+    const sorted = Array.from(map.values()).sort((a,b) => a[0]-b[0]);
+    return {
+      paginas, motivoParada, finDeHistorico,
+      times: sorted.map(k => k[0]),
+      opens: sorted.map(k => parseFloat(k[1])),
+      highs: sorted.map(k => parseFloat(k[2])),
+      lows: sorted.map(k => parseFloat(k[3])),
+      closes: sorted.map(k => parseFloat(k[4])),
+      volumes: sorted.map(k => parseFloat(k[5]))
+    };
+  }
+
+  try{
+    console.log('\nDescargando TODO el histórico de 15M disponible en la API (esto tarda unos minutos)...');
+    const t0BO = Date.now();
+    const ohlcv15MBO = await descargarTodoElHistoricoBO('15m', MAX_PAGINAS_BO);
+    const nBO = ohlcv15MBO.times.length;
+    const segundosBO = (Date.now() - t0BO)/1000;
+
+    const primeraFechaBO = ohlcv15MBO.times[0];
+    const ultimaFechaBO = ohlcv15MBO.times[nBO-1];
+    const esperadasBO = Math.round((ultimaFechaBO - primeraFechaBO)/900000) + 1;
+    const huecosBO = esperadasBO - nBO;
+    const aniosBO = (ultimaFechaBO - primeraFechaBO)/(365.25*86400000);
+
+    console.log('\n--- Lo que la API entrega realmente (símbolo ' + SYMBOL + ') ---');
+    console.log('Velas de 15M descargadas : ' + nBO + ' (en ' + ohlcv15MBO.paginas + ' páginas, ' + segundosBO.toFixed(0) + 's)');
+    console.log('Desde                    : ' + new Date(primeraFechaBO).toISOString());
+    console.log('Hasta                    : ' + new Date(ultimaFechaBO).toISOString());
+    console.log('Periodo cubierto         : ' + aniosBO.toFixed(2) + ' años');
+    console.log('Velas esperadas sin huecos: ' + esperadasBO + ' → huecos detectados: ' + huecosBO +
+      ' (' + (esperadasBO>0 ? (huecosBO/esperadasBO*100).toFixed(2) : '0.00') + '%)');
+    console.log('Motivo de parada         : ' + ohlcv15MBO.motivoParada);
+    const topeReal = ohlcv15MBO.finDeHistorico;
+    console.log(topeReal
+      ? '→ Se agotó el histórico de la API: este es el TECHO REAL de datos.'
+      : '→ NO se llegó al techo real: la descarga se cortó antes. La cifra de abajo es un SUELO, no el máximo.');
+
+    console.log('\nCalculando indicadores sobre el histórico completo...');
+    const t1BO = Date.now();
+    const s15MBO = computeFullSeries(ohlcv15MBO);
+    console.log('Indicadores calculados en ' + ((Date.now()-t1BO)/1000).toFixed(0) + 's sobre ' + s15MBO.n + ' velas.');
+
+    // Disparador de 15M puro: las mismas cuatro condiciones de BI, SIN filtro de 1H.
+    function disparo15MPuroBO(series, i, direction){
+      const koncordeOk = direction === 'long' ? dentroZonaAmarillaUnica(series, i) : saliendoZonaAmarillaHaciaAbajo(series, i);
+      return koncordeOk
+        && (direction === 'long' ? series.aoState[i] === 'Alcista' : series.aoState[i] === 'Bajista')
+        && series.adxSubiendo[i]
+        && series.bbwp[i] > 50;
+    }
+
+    const resumenBO = ['long','short'].map(direction => {
+      const disparo = new Array(s15MBO.n).fill(false);
+      for(let i=0; i<s15MBO.n; i++) if(disparo15MPuroBO(s15MBO, i, direction)) disparo[i] = true;
+      const resultados = carreraHaciaObjetivo(s15MBO, disparo, direction, TARGET_PCT, STOP_PCT, MAX_BARS);
+      const resueltos = resultados.filter(r => r.resultado !== null);
+      const ganadas = resueltos.filter(r => r.resultado === true).length;
+      return {
+        direction,
+        disparos: resultados.length,
+        resueltos: resueltos.length,
+        ganadas,
+        winRate: resueltos.length ? ganadas/resueltos.length*100 : NaN,
+        resultados
+      };
+    });
+
+    console.log('\n--- Máximo de muestra alcanzable: disparador de 15M puro, SIN filtro de 1H, sobre todo el histórico ---');
+    console.log(pad('Dirección', 12) + padL('Disparos', 10) + padL('Resueltas', 11) + padL('Sin resolver', 14) + padL('% acierto', 11));
+    resumenBO.forEach(r => {
+      console.log(pad(r.direction === 'long' ? 'Largo' : 'Corto', 12) + padL(r.disparos, 10) + padL(r.resueltos, 11) +
+        padL(r.disparos - r.resueltos, 14) + padL(isNaN(r.winRate) ? '—' : r.winRate.toFixed(1)+'%', 11));
+    });
+    const disparosTotalBO = resumenBO.reduce((a,r) => a+r.disparos, 0);
+    const resueltosTotalBO = resumenBO.reduce((a,r) => a+r.resueltos, 0);
+    const ganadasTotalBO = resumenBO.reduce((a,r) => a+r.ganadas, 0);
+    const winRateTotalBO = resueltosTotalBO > 0 ? ganadasTotalBO/resueltosTotalBO*100 : NaN;
+    console.log(pad('TOTAL', 12) + padL(disparosTotalBO, 10) + padL(resueltosTotalBO, 11) +
+      padL(disparosTotalBO - resueltosTotalBO, 14) + padL(isNaN(winRateTotalBO) ? '—' : winRateTotalBO.toFixed(1)+'%', 11));
+
+    // Reparto por año: para ver si la muestra está concentrada en unos pocos años
+    const porAnioBO = new Map();
+    for(let i=0; i<s15MBO.n; i++){
+      const anio = new Date(s15MBO.times[i]).getUTCFullYear();
+      if(!porAnioBO.has(anio)) porAnioBO.set(anio, { velas:0, disparos:0, resueltos:0, ganadas:0 });
+      porAnioBO.get(anio).velas++;
+    }
+    resumenBO.forEach(r => r.resultados.forEach(x => {
+      const anio = new Date(s15MBO.times[x.entryIdx]).getUTCFullYear();
+      const e = porAnioBO.get(anio);
+      if(!e) return;
+      e.disparos++;
+      if(x.resultado !== null){ e.resueltos++; if(x.resultado === true) e.ganadas++; }
+    }));
+    console.log('\n--- Reparto por año (¿la muestra está concentrada o repartida?) ---');
+    console.log(pad('Año', 8) + padL('Velas 15M', 11) + padL('Disparos', 10) + padL('Resueltas', 11) + padL('% acierto', 11));
+    const aniosOrdenadosBO = Array.from(porAnioBO.keys()).sort((a,b) => a-b);
+    let aniosConMuestraBO = 0;
+    aniosOrdenadosBO.forEach(anio => {
+      const e = porAnioBO.get(anio);
+      const wr = e.resueltos > 0 ? e.ganadas/e.resueltos*100 : NaN;
+      if(e.resueltos > 0) aniosConMuestraBO++;
+      console.log(pad(anio, 8) + padL(e.velas, 11) + padL(e.disparos, 10) + padL(e.resueltos, 11) +
+        padL(isNaN(wr) ? '—' : wr.toFixed(1)+'%', 11));
+    });
+
+    // --- Conclusión automática de BO ---
+    console.log('\n--- Conclusión automática (BO) ---');
+    console.log('TAMAÑO DE MUESTRA PRIMERO: ' + resueltosTotalBO + ' operaciones resueltas con el histórico máximo (' +
+      aniosBO.toFixed(2) + ' años) y SIN ningún filtro de 1H.');
+    if(resueltosTotalBO < UMBRAL_MUESTRA_PROYECTO){
+      console.log('→ MUESTRA INSUFICIENTE. Ni con todo el histórico posible ni quitando el filtro de 1H se alcanzan ' +
+        UMBRAL_MUESTRA_PROYECTO + ' operaciones resueltas.');
+      console.log('→ DECISIÓN AUTOMÁTICA: ARCHIVAR el concepto de 15M. No hay forma de conseguir muestra suficiente');
+      console.log('  sin cambiar la señal, así que no procede seguir con BL, BM ni BN. Volver al 4H, que sí funciona.');
+      if(!topeReal){
+        console.log('  MATIZ QUE INVALIDA LA DECISIÓN: la descarga NO llegó al fin del histórico (' + ohlcv15MBO.motivoParada + ').');
+        console.log('  No se archiva nada con este dato. Repetir BO subiendo MAX_PAGINAS_BO o cuando la API responda bien.');
+      }
+    } else {
+      console.log('→ MUESTRA SUFICIENTE en el techo. El concepto de 15M NO se archiva: hay margen para seguir con BL y BN.');
+      const margen = resueltosTotalBO / UMBRAL_MUESTRA_PROYECTO;
+      console.log('  Margen sobre el mínimo: ×' + margen.toFixed(2) + '. Cualquier filtro que se añada solo puede reducir');
+      console.log('  esta cifra, así que un filtro que corte más del ' + ((1 - UMBRAL_MUESTRA_PROYECTO/resueltosTotalBO)*100).toFixed(0) +
+        '% de las entradas deja el análisis sin muestra.');
+      console.log('  Años con al menos una operación resuelta: ' + aniosConMuestraBO + ' de ' + aniosOrdenadosBO.length +
+        ' → ' + (aniosConMuestraBO >= aniosOrdenadosBO.length - 1 ? 'muestra REPARTIDA en el tiempo.' : 'muestra CONCENTRADA: revisar en qué años, no dar el resultado por bueno sin ese contexto.'));
+    }
+    console.log('\nComparación BK vs BO: BK midió ' + resueltosTotalBK + ' operaciones resueltas con la señal completa sobre ' +
+      s15MBH.n + ' velas; BO mide ' + resueltosTotalBO + ' en el techo con ' + s15MBO.n + ' velas y sin filtro de 1H.');
+    console.log('La diferencia entre esas dos cifras es todo lo que hay que ganar optimizando; el resto no existe.');
+
+  }catch(errBO){
+    console.log('\nANÁLISIS BO NO COMPLETADO — fallo al descargar o procesar el histórico: ' + errBO.message);
+    console.log('No se emite conclusión: sin el dato del techo de histórico, BK por sí solo no decide si se archiva el 15M.');
+  }
+
   console.log('\n=== Fin del backtest ===');
 }
 
