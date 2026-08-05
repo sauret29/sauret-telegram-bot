@@ -1295,13 +1295,14 @@ function velasLlevaCumplida(getCondicion, i){
 // cierra si el precio vuelve al precio de entrada (breakeven), para que la
 // operación completa nunca pueda terminar en negativo tras haber cobrado
 // la parte parcial.
-function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela, fraccionCierre, protegerBreakeven, filtroEntradaExtra, slPct, trailPct){
+function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, marginFraction, horasPorVela, fraccionCierre, protegerBreakeven, filtroEntradaExtra, slPct, trailPct, marginFractionFn){
   const idxD = alignDailyIndex(seriesD, series4H.times);
   const n = series4H.n;
   let equity = 1.0, peak = 1.0, maxDrawdown = 0;
   let position=null, entryPrice=null, tpPrice=null, slPrice=null, mejorPrecioFavorable=null, entryIdx=null, tpParcialHecho=false, fraccionRestante=null, ultimoCierreIdx=null, equityAntesEntrada=null;
   const trades = [];
-  const nocionalFraction = marginFraction * leverage;
+  let marginFractionActiva = marginFraction;
+  let nocionalFraction = marginFraction * leverage;
 
   function cerrarFraccion(fraccion, exitPrice, feePct, iExit, iDesde){
     const rawReturn = position==='long' ? (exitPrice/entryPrice - 1) : (1 - exitPrice/entryPrice);
@@ -1310,7 +1311,7 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
     const horasAbierta = (iExit - iDesde) * horasPorVela;
     const periodosFunding = Math.floor(horasAbierta / 8);
     const fundingPct = (nocionalFraction*fraccion) * (BITGET_FUNDING_PCT_PER_8H/100) * periodosFunding * 100;
-    const equityChange = (marginFraction*fraccion) * leveraged - comisionPct/100 - fundingPct/100;
+    const equityChange = (marginFractionActiva*fraccion) * leveraged - comisionPct/100 - fundingPct/100;
     equity *= Math.max(0, 1 + equityChange);
     peak = Math.max(peak, equity);
     maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
@@ -1375,6 +1376,8 @@ function simulateConfluenciaTPParcial(series4H, seriesD, tpPct, leverage, margin
         const pasaFiltroExtra = !filtroEntradaExtra || filtroEntradaExtra(i, direction);
         if(pasaFiltroExtra){
           position = direction;
+          marginFractionActiva = marginFractionFn!=null ? marginFractionFn(i, direction) : marginFraction;
+          nocionalFraction = marginFractionActiva * leverage;
           entryPrice = series4H.closes[i];
           tpPrice = position==='long' ? entryPrice*(1+tpPct/100) : entryPrice*(1-tpPct/100);
           slPrice = slPct!=null ? (position==='long' ? entryPrice*(1-slPct/100) : entryPrice*(1+slPct/100)) : null;
@@ -3357,6 +3360,36 @@ async function main(){
   console.log(pad('Tramo',20)+padL('Operac.',9)+padL('% Acierto',11)+padL('Retorno',12)+padL('Drawdown',11)+padL('P.Factor',10));
   console.log(pad('Resto del histórico',20)+padL(mAntes1HComb.trades,9)+padL(mAntes1HComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mAntes1HComb.totalReturnPct),12)+padL('-'+mAntes1HComb.maxDrawdownPct.toFixed(1)+'%',11)+padL(mAntes1HComb.profitFactor.toFixed(2),10));
   console.log(pad('TRAMO RESERVADO',20)+padL(mReservado1HComb.trades,9)+padL(mReservado1HComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mReservado1HComb.totalReturnPct),12)+padL('-'+mReservado1HComb.maxDrawdownPct.toFixed(1)+'%',11)+padL(mReservado1HComb.profitFactor.toFixed(2),10));
+
+  // ---------- ANÁLISIS AZ: tamaño de posición VARIABLE según BBWP+ML RSI, sin excluir ninguna operación ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AZ — Tamaño de posición variable (pesar, no excluir): más capital cuando BBWP≥90+ML RSI coincide');
+  console.log('========================================');
+  console.log('Se mantienen las 404 operaciones de la 20/80 (nada se descarta) — solo cambia cuánto capital se');
+  console.log('arriesga en cada una: más cuando se cumple la combinación de calidad, menos cuando no se cumple.');
+  console.log('Se prueban varios repartos, todos con una media parecida al 12% actual, para comparar en igualdad.');
+
+  function fraccionSegunCombinacion(fraccionAlta, fraccionBaja){
+    return (i, direction) => {
+      const b = s4H.bbwp[i];
+      const mlOk = direction==='long' ? mlSignal4H[i]==='Alcista' : mlSignal4H[i]==='Bajista';
+      const cumpleCombinacion = !isNaN(b) && b>=90 && mlOk;
+      return cumpleCombinacion ? fraccionAlta : fraccionBaja;
+    };
+  }
+
+  console.log('\n' + pad('Reparto',16) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',14) + padL('Drawdown',11) + padL('P.Factor',10));
+  const rBaseAZ = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false);
+  console.log(pad('(fijo 12%, actual)',16) + padL(rBaseAZ.trades,9) + padL(rBaseAZ.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rBaseAZ.totalReturnPct),14) + padL('-'+rBaseAZ.maxDrawdownPct.toFixed(1)+'%',11) + padL(rBaseAZ.profitFactor.toFixed(2),10));
+
+  const repartos = [[16,10],[20,8],[24,6],[30,4],[40,2]];
+  const resultadosAZ = {};
+  repartos.forEach(([alta,baja])=>{
+    const fn = fraccionSegunCombinacion(alta/100, baja/100);
+    const r = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, undefined, undefined, undefined, fn);
+    resultadosAZ[alta+'/'+baja] = r;
+    console.log(pad(alta+'%/'+baja+'%',16) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),14) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
+  });
 
   console.log('\n=== Fin del backtest ===');
 }
