@@ -3468,6 +3468,36 @@ async function main(){
 
   console.log('\n(referencia, con BBWP≥90, Análisis AZ): 16/10 Ret/DD=67.7 · 20/8=71.6 · 24/6=72.9 · 30/4=69.2 · 40/2=53.9');
 
+  // ---------- ANÁLISIS BC: tamaño de posición variable, aplicado a entradas de 1H (confirmadas por 4H) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BC — Tamaño de posición variable (BBWP≥90+ML RSI, calculado en 1H) sobre entradas de 1H');
+  console.log('========================================');
+  console.log('El filtro (excluir) en 1H fallaba (Análisis AY). Aquí se prueba PESAR en vez de excluir —');
+  console.log('mismo principio que funcionó en 4H (Análisis AZ/BA), esta vez sobre la señal base de 1H.');
+
+  function fraccionSegunCombinacion1H(fraccionAlta, fraccionBaja, umbralBBWP){
+    return (i, direction) => {
+      const b = s.bbwp[i];
+      const mlOk = direction==='long' ? mlSignal[i]==='Alcista' : mlSignal[i]==='Bajista';
+      const cumpleCombinacion = !isNaN(b) && b>=umbralBBWP && mlOk;
+      return cumpleCombinacion ? fraccionAlta : fraccionBaja;
+    };
+  }
+
+  const rBase1HBC = simulateConfluenciaTPParcial(s, s4H, 3, LEVERAGE, 0.12, 1, 0.20, false);
+  console.log('\nBase 1H (12% fijo, sin ningún filtro ni peso): ' + rBase1HBC.trades + ' operaciones · ' + fmtPct(rBase1HBC.totalReturnPct) + ' · Drawdown -' + rBase1HBC.maxDrawdownPct.toFixed(1) + '% · P.Factor ' + rBase1HBC.profitFactor.toFixed(2));
+
+  console.log('\n' + pad('Reparto',16) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',14) + padL('Drawdown',11) + padL('P.Factor',10) + padL('Ret/DD',9));
+  console.log(pad('(fijo 12%)',16) + padL(rBase1HBC.trades,9) + padL(rBase1HBC.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(rBase1HBC.totalReturnPct),14) + padL('-'+rBase1HBC.maxDrawdownPct.toFixed(1)+'%',11) + padL(rBase1HBC.profitFactor.toFixed(2),10) + padL((rBase1HBC.totalReturnPct/rBase1HBC.maxDrawdownPct).toFixed(1),9));
+
+  [[16,10],[20,8],[24,6],[30,4],[40,2]].forEach(([alta,baja])=>{
+    const fn = fraccionSegunCombinacion1H(alta/100, baja/100, 90);
+    const r = simulateConfluenciaTPParcial(s, s4H, 3, LEVERAGE, 0.12, 1, 0.20, false, undefined, undefined, undefined, fn);
+    console.log(pad(alta+'%/'+baja+'%',16) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),14) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10) + padL((r.totalReturnPct/r.maxDrawdownPct).toFixed(1),9));
+  });
+
+  console.log('\n(referencia, mismo mecanismo en 4H, Análisis AZ): 24%/6% → Retorno +1057.42% · Drawdown -14.5% · Ret/DD=72.9');
+
   console.log('\n=== Fin del backtest ===');
 }
 
