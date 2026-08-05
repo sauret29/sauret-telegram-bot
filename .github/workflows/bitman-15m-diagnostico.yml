@@ -1,0 +1,53 @@
+name: Bitman · Diagnóstico 15M (manual)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      simbolo:
+        description: 'Símbolo a analizar (ej. BTCUSDT, ETHUSDT)'
+        required: true
+        default: 'BTCUSDT'
+      meses_15m:
+        description: 'Meses de histórico de 15M para el embudo (el 1H se descarga para cubrirlos todos)'
+        required: true
+        default: '48'
+      umbral_muestra:
+        description: 'Mínimo de operaciones resueltas para considerar la muestra interpretable'
+        required: true
+        default: '100'
+      ventana_1h:
+        description: 'Ventana en horas para la confirmación de retroceso en 1H'
+        required: true
+        default: '12'
+      saltar_techo:
+        description: 'Saltar el análisis D (techo de histórico completo). 1 = saltar, 0 = ejecutarlo'
+        required: true
+        default: '0'
+      max_paginas_techo:
+        description: 'Máximo de páginas de 1000 velas a descargar en el análisis D'
+        required: true
+        default: '500'
+
+jobs:
+  diagnostico-15m:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Ejecutar diagnóstico de 15M
+        env:
+          SYMBOL: ${{ github.event.inputs.simbolo }}
+          MESES_15M: ${{ github.event.inputs.meses_15m }}
+          UMBRAL_MUESTRA: ${{ github.event.inputs.umbral_muestra }}
+          VENTANA_1H: ${{ github.event.inputs.ventana_1h }}
+          SALTAR_TECHO: ${{ github.event.inputs.saltar_techo }}
+          MAX_PAGINAS_TECHO: ${{ github.event.inputs.max_paginas_techo }}
+          NODE_OPTIONS: '--max-old-space-size=6144'
+        run: node backtests/bitman-15m-diagnostico.js
