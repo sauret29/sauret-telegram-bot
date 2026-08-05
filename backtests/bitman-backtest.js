@@ -1352,6 +1352,39 @@ function contarCambiosAO(series, i, ventana){
 // para cubrir tanto "ya pasó de 50" como "a punto de llegar"), Y estrictamente
 // mayor que 'lookback' velas atrás (confirma que está subiendo, no bajando ni
 // plano).
+// ¿Está la media (maTrend) DENTRO de la zona amarilla (entre 0 y oscp)?
+// Para largos: oscp>0 y 0<maTrend<oscp. Para cortos: oscp<0 y oscp<maTrend<0 (espejo).
+function dentroZonaAmarilla(series, i, direction){
+  const oscp = series.oscp[i], mt = series.maTrend[i];
+  if(isNaN(oscp) || isNaN(mt)) return false;
+  return direction==='long' ? (oscp>0 && mt>0 && mt<oscp) : (oscp<0 && mt<0 && mt>oscp);
+}
+
+// ¿Acaba de ENTRAR la media en la zona amarilla en esta vela concreta (antes no estaba, ahora sí)?
+function entrandoZonaAmarilla(series, i, direction){
+  if(i<1) return false;
+  return dentroZonaAmarilla(series, i, direction) && !dentroZonaAmarilla(series, i-1, direction);
+}
+
+// ¿Está el AO "cerca de cero" en relación a su propio historial reciente? (no tiene escala
+// fija, así que se compara contra la magnitud media de |AO| en la ventana previa)
+function aoCercaDeCero(series, i, ventana, factor){
+  if(i<ventana) return false;
+  let suma = 0, cuenta = 0;
+  for(let k=i-ventana; k<i; k++){ if(!isNaN(series.ao[k])){ suma += Math.abs(series.ao[k]); cuenta++; } }
+  if(cuenta===0 || isNaN(series.ao[i])) return false;
+  const mediaReciente = suma/cuenta;
+  return Math.abs(series.ao[i]) < factor*mediaReciente;
+}
+
+// ¿Está el BBWP "acercándose" a un nivel (dentro de un rango por debajo) Y subiendo?
+function bbwpAcercandoseA(series, i, nivel, margen, lookback){
+  if(i<lookback) return false;
+  if(isNaN(series.bbwp[i]) || isNaN(series.bbwp[i-lookback])) return false;
+  const enRango = series.bbwp[i] <= nivel && series.bbwp[i] >= nivel-margen;
+  return enRango && series.bbwp[i] > series.bbwp[i-lookback];
+}
+
 function bbwpAscendiendoYAlto(series, i, umbral, lookback){
   if(umbral==null) umbral = 45;
   if(lookback==null) lookback = 3;
@@ -3627,6 +3660,55 @@ async function main(){
   });
   console.log('\n(referencia: 50% de acierto sería el punto de equilibrio con objetivo y stop simétricos — por');
   console.log('encima indica poder predictivo real; por debajo, que el indicador acierta menos que el azar)');
+
+  // ---------- ANÁLISIS BE: señal combinada — impulso en 15M + retroceso completándose en 1H ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BE — Señal combinada: impulso en 15M + retroceso completándose en 1H');
+  console.log('========================================');
+  console.log('15M (impulso): Koncorde DENTRO de la zona amarilla + AO/ADX mostrando impulso + BBWP>50.');
+  console.log('1H (retroceso completándose, en las últimas 4 horas): Koncorde ENTRANDO en la zona amarilla +');
+  console.log('AO cerca de cero + BBWP acercándose a 50 desde abajo. Se prueba con la misma carrera ±2% que el');
+  console.log('Análisis BD, para comparar directamente contra los indicadores sueltos.');
+
+  function impulso15M(i, direction){
+    return dentroZonaAmarilla(s15MBD, i, direction)
+      && (direction==='long' ? s15MBD.aoState[i]==='Alcista' : s15MBD.aoState[i]==='Bajista')
+      && s15MBD.adxSubiendo[i]
+      && s15MBD.bbwp[i]>50;
+  }
+  function retroceso1H(j, direction){
+    return entrandoZonaAmarilla(s, j, direction)
+      && aoCercaDeCero(s, j, 50, 0.35)
+      && bbwpAcercandoseA(s, j, 50, 15, 3);
+  }
+
+  const idx1HPara15M = alignDailyIndex(s, s15MBD.times);
+  const VENTANA_RETROCESO_HORAS = 4;
+
+  function retrocesoRecienteEn1H(i15M, direction){
+    const j = idx1HPara15M[i15M];
+    if(j<0) return false;
+    const desde = Math.max(0, j - VENTANA_RETROCESO_HORAS);
+    for(let k=desde; k<=j; k++){ if(retroceso1H(k, direction)) return true; }
+    return false;
+  }
+
+  const disparoLargo = new Array(s15MBD.n).fill(false), disparoCorto = new Array(s15MBD.n).fill(false);
+  for(let i=0;i<s15MBD.n;i++){
+    if(impulso15M(i,'long') && retrocesoRecienteEn1H(i,'long')) disparoLargo[i]=true;
+    if(impulso15M(i,'short') && retrocesoRecienteEn1H(i,'short')) disparoCorto[i]=true;
+  }
+
+  const numDisparosLargo = disparoLargo.filter(Boolean).length;
+  const numDisparosCorto = disparoCorto.filter(Boolean).length;
+  console.log('\nDisparos encontrados: ' + numDisparosLargo + ' largos, ' + numDisparosCorto + ' cortos (de ' + s15MBD.n + ' velas de 15M)');
+
+  const evalLargo = evaluarIndicador(s15MBD, disparoLargo, 'long', TARGET_PCT, STOP_PCT, MAX_BARS);
+  const evalCorto = evaluarIndicador(s15MBD, disparoCorto, 'short', TARGET_PCT, STOP_PCT, MAX_BARS);
+  console.log('\n' + pad('Dirección',10) + padL('Disparos',10) + padL('Resueltos',11) + padL('% Acierto',11) + padL('Velas medias',13));
+  console.log(pad('Largo',10) + padL(evalLargo.disparos,10) + padL(evalLargo.resueltos,11) + padL(isNaN(evalLargo.winRate)?'—':evalLargo.winRate.toFixed(1)+'%',11) + padL(isNaN(evalLargo.mediaBarras)?'—':evalLargo.mediaBarras.toFixed(1),13));
+  console.log(pad('Corto',10) + padL(evalCorto.disparos,10) + padL(evalCorto.resueltos,11) + padL(isNaN(evalCorto.winRate)?'—':evalCorto.winRate.toFixed(1)+'%',11) + padL(isNaN(evalCorto.mediaBarras)?'—':evalCorto.mediaBarras.toFixed(1),13));
+  console.log('\n(referencia: 50% es el punto de equilibrio; comparar contra los indicadores sueltos del Análisis BD)');
 
   console.log('\n=== Fin del backtest ===');
 }
