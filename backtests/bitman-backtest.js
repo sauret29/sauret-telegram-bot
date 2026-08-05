@@ -1257,6 +1257,88 @@ function metricsForTradeSubset(tradeLog){
 // en las últimas 'ventana' velas antes (e incluyendo) el índice i — una
 // medida directa de "cuántos bandazos está dando el indicador" justo antes
 // de esa entrada. Muchos cambios = indicador indeciso/errático.
+// Para cada vela donde 'triggerArray' es true, comprueba cuál de los dos umbrales
+// (a favor, 'targetPct', o en contra, 'stopPct') se toca antes, mirando hasta
+// 'maxBars' velas hacia adelante. Si ambos se tocan en la misma vela, cuenta como
+// pérdida (criterio conservador). Genérica: sirve para cualquier indicador y
+// cualquier temporalidad, solo necesita el array de disparo ya calculado.
+function carreraHaciaObjetivo(series, triggerArray, direction, targetPct, stopPct, maxBars){
+  const resultados = [];
+  const n = series.n;
+  for(let i=0; i<n; i++){
+    if(!triggerArray[i]) continue;
+    if(i+1>=n) continue;
+    const entryPrice = series.closes[i];
+    const targetPrice = direction==='long' ? entryPrice*(1+targetPct/100) : entryPrice*(1-targetPct/100);
+    const stopPrice = direction==='long' ? entryPrice*(1-stopPct/100) : entryPrice*(1+stopPct/100);
+    let resultado = null, barsHasta = null;
+    const limite = Math.min(i+maxBars, n-1);
+    for(let k=i+1; k<=limite; k++){
+      const tocaTarget = direction==='long' ? series.highs[k]>=targetPrice : series.lows[k]<=targetPrice;
+      const tocaStop = direction==='long' ? series.lows[k]<=stopPrice : series.highs[k]>=stopPrice;
+      if(tocaStop){ resultado = false; barsHasta = k-i; break; } // el stop tiene prioridad si coincide (conservador)
+      if(tocaTarget){ resultado = true; barsHasta = k-i; break; }
+    }
+    resultados.push({ entryIdx: i, resultado, barsHasta });
+  }
+  return resultados;
+}
+
+// Construye, para una serie dada, los arrays de disparo (largo/corto) de cada
+// indicador por separado — genérico, para no repetir la misma lógica siete veces.
+function construirDisparadores(series, mlSignalSerie){
+  const n = series.n;
+  function flipToState(arr, estado){
+    const out = new Array(n).fill(false);
+    for(let i=1;i<n;i++) if(arr[i]===estado && arr[i-1]!==estado) out[i]=true;
+    return out;
+  }
+  function flipToTrue(arr){
+    const out = new Array(n).fill(false);
+    for(let i=1;i<n;i++) if(arr[i] && !arr[i-1]) out[i]=true;
+    return out;
+  }
+  function crossAbove(a,b){
+    const out = new Array(n).fill(false);
+    for(let i=1;i<n;i++){
+      if(isNaN(a[i])||isNaN(b[i])||isNaN(a[i-1])||isNaN(b[i-1])) continue;
+      if(a[i]>b[i] && a[i-1]<=b[i-1]) out[i]=true;
+    }
+    return out;
+  }
+  function crossSign(vals, positivo){
+    const out = new Array(n).fill(false);
+    for(let i=1;i<n;i++){
+      if(isNaN(vals[i])||isNaN(vals[i-1])) continue;
+      if(positivo ? (vals[i]>0 && vals[i-1]<=0) : (vals[i]<0 && vals[i-1]>=0)) out[i]=true;
+    }
+    return out;
+  }
+
+  const momentumReciente = new Array(n).fill('long');
+  for(let i=3;i<n;i++) momentumReciente[i] = series.closes[i]>series.closes[i-3] ? 'long' : 'short';
+
+  const bbwpLong = new Array(n).fill(false), bbwpShort = new Array(n).fill(false);
+  for(let i=0;i<n;i++){
+    if(bbwpAscendiendoYAlto(series, i, 50, 3)){
+      if(momentumReciente[i]==='long') bbwpLong[i]=true; else bbwpShort[i]=true;
+    }
+  }
+
+  const disparadores = {
+    'AO': { long: flipToState(series.aoState,'Alcista'), short: flipToState(series.aoState,'Bajista') },
+    'Koncorde': { long: flipToTrue(series.koBull), short: flipToTrue(series.koBear) },
+    'ADX (cruce DI)': { long: crossAbove(series.plusDI, series.minusDI), short: crossAbove(series.minusDI, series.plusDI) },
+    'BBWP (despierta)': { long: bbwpLong, short: bbwpShort },
+    'LaRSI': { long: series.larsiState.map(s=>s==='compra'), short: series.larsiState.map(s=>s==='venta') },
+    'Trend Speed': { long: crossSign(series.trendspeed, true), short: crossSign(series.trendspeed, false) }
+  };
+  if(mlSignalSerie){
+    disparadores['ML RSI'] = { long: flipToState(mlSignalSerie,'Alcista'), short: flipToState(mlSignalSerie,'Bajista') };
+  }
+  return disparadores;
+}
+
 function contarCambiosAO(series, i, ventana){
   let cambios = 0;
   const desde = Math.max(1, i - ventana + 1);
@@ -3497,6 +3579,54 @@ async function main(){
   });
 
   console.log('\n(referencia, mismo mecanismo en 4H, Análisis AZ): 24%/6% → Retorno +1057.42% · Drawdown -14.5% · Ret/DD=72.9');
+
+  // ---------- ANÁLISIS BD: PROYECTO NUEVO — ¿qué indicadores predicen mejor un movimiento rápido en 15M y 1H? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BD — Proyecto nuevo desde cero: poder predictivo de cada indicador por separado, en 15M y 1H');
+  console.log('========================================');
+  console.log('Objetivo: entradas cortas, +2% de precio (+10% a 5x) y salir. Para cada indicador, medido por');
+  console.log('separado (sin exigir que coincidan varios a la vez), se comprueba: cuando dispara, ¿el precio');
+  console.log('llega antes a +2% a favor o a -2% en contra? Ventana: 40 velas. Sin confirmación de temporalidad');
+  console.log('superior — cada temporalidad se evalúa de forma completamente independiente.');
+
+  const TARGET_PCT = 2, STOP_PCT = 2, MAX_BARS = 40;
+
+  console.log('\nDescargando velas de 15M (24 meses, para mantener el tiempo de cálculo razonable)...');
+  const ohlcv15MBD = await fetchCandlesForMonths('15m', 24, 300);
+  const s15MBD = computeFullSeries(ohlcv15MBD);
+  console.log('Calculando ML RSI en 15M...');
+  const mlSignal15MBD = computeMLRSISeries(s15MBD.closes);
+  console.log('Velas 15M: ' + s15MBD.n);
+
+  const disparadores15M = construirDisparadores(s15MBD, mlSignal15MBD);
+  const disparadores1H = construirDisparadores(s, mlSignal);
+
+  function evaluarIndicador(series, disparo, direction, target, stop, maxBars){
+    const resultados = carreraHaciaObjetivo(series, disparo, direction, target, stop, maxBars);
+    const resueltos = resultados.filter(r=>r.resultado!==null);
+    const ganadas = resueltos.filter(r=>r.resultado===true);
+    const mediaBarras = ganadas.length ? ganadas.reduce((a,r)=>a+r.barsHasta,0)/ganadas.length : NaN;
+    return {
+      disparos: resultados.length,
+      resueltos: resueltos.length,
+      winRate: resueltos.length ? ganadas.length/resueltos.length*100 : NaN,
+      mediaBarras
+    };
+  }
+
+  console.log('\n--- Resultado por indicador y temporalidad (objetivo ±2%, ventana 40 velas) ---');
+  console.log(pad('Indicador',18) + pad('Temp.',7) + pad('Dir.',6) + padL('Disparos',10) + padL('% Acierto',11) + padL('Velas medias',13));
+  const nombresIndicadores = ['AO','Koncorde','ADX (cruce DI)','BBWP (despierta)','LaRSI','Trend Speed','ML RSI'];
+  nombresIndicadores.forEach(nombre=>{
+    ['long','short'].forEach(direccion=>{
+      const e15 = evaluarIndicador(s15MBD, disparadores15M[nombre][direccion], direccion, TARGET_PCT, STOP_PCT, MAX_BARS);
+      const e1h = evaluarIndicador(s, disparadores1H[nombre][direccion], direccion, TARGET_PCT, STOP_PCT, MAX_BARS);
+      console.log(pad(nombre,18) + pad('15M',7) + pad(direccion==='long'?'Largo':'Corto',6) + padL(e15.disparos,10) + padL(isNaN(e15.winRate)?'—':e15.winRate.toFixed(1)+'%',11) + padL(isNaN(e15.mediaBarras)?'—':e15.mediaBarras.toFixed(1),13));
+      console.log(pad('',18) + pad('1H',7) + pad(direccion==='long'?'Largo':'Corto',6) + padL(e1h.disparos,10) + padL(isNaN(e1h.winRate)?'—':e1h.winRate.toFixed(1)+'%',11) + padL(isNaN(e1h.mediaBarras)?'—':e1h.mediaBarras.toFixed(1),13));
+    });
+  });
+  console.log('\n(referencia: 50% de acierto sería el punto de equilibrio con objetivo y stop simétricos — por');
+  console.log('encima indica poder predictivo real; por debajo, que el indicador acierta menos que el azar)');
 
   console.log('\n=== Fin del backtest ===');
 }
