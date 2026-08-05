@@ -3391,6 +3391,43 @@ async function main(){
     console.log(pad(alta+'%/'+baja+'%',16) + padL(r.trades,9) + padL(r.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(r.totalReturnPct),14) + padL('-'+r.maxDrawdownPct.toFixed(1)+'%',11) + padL(r.profitFactor.toFixed(2),10));
   });
 
+  // ---------- ANÁLISIS BA: validación rigurosa del reparto 24%/6% (el mejor punto del Análisis AZ) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BA — Validación rigurosa del tamaño de posición variable 24%/6% (mismo rigor que AF/AK/AN/AW)');
+  console.log('========================================');
+  console.log('El reparto 24%/6% maximizaba la relación Retorno/Drawdown en el Análisis AZ, sin excluir ninguna');
+  console.log('operación. Aquí se somete al mismo walk-forward + fuera de muestra que el resto de hallazgos de hoy.');
+
+  const fnMejorReparto = fraccionSegunCombinacion(0.24, 0.06);
+  const rBA = simulateConfluenciaTPParcial(s4H, sD, 3, LEVERAGE, 0.12, 4, 0.20, false, undefined, undefined, undefined, fnMejorReparto);
+
+  console.log('\n--- Walk-forward año por año, reparto 24%/6% ---');
+  console.log(pad('Año',8) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',14) + padL('Drawdown',11) + padL('P.Factor',10));
+  const bucketsBA = {};
+  rBA.tradeLog.forEach(t=>{
+    const year = new Date(s4H.times[t.entryIdx]).getUTCFullYear();
+    if(!bucketsBA[year]) bucketsBA[year] = [];
+    bucketsBA[year].push(t);
+  });
+  let aniosPositivosBA=0, aniosTotalBA=0;
+  Object.keys(bucketsBA).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(bucketsBA[year]);
+    console.log(pad(String(year),8) + padL(m.trades,9) + padL(m.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(m.totalReturnPct),14) + padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11) + padL(m.profitFactor.toFixed(2),10));
+    aniosTotalBA++;
+    if(m.totalReturnPct>0) aniosPositivosBA++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivosBA + ' de ' + aniosTotalBA);
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados, reparto 24%/6% ---');
+  const cutoffReservadoBA = ohlcv4H.times[ohlcv4H.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntesBA = rBA.tradeLog.filter(t => s4H.times[t.entryIdx] < cutoffReservadoBA);
+  const tradesReservadoBA = rBA.tradeLog.filter(t => s4H.times[t.entryIdx] >= cutoffReservadoBA);
+  const mAntesBA = metricsForTradeSubset(tradesAntesBA);
+  const mReservadoBA = metricsForTradeSubset(tradesReservadoBA);
+  console.log(pad('Tramo',20) + padL('Operac.',9) + padL('% Acierto',11) + padL('Retorno',14) + padL('Drawdown',11) + padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20) + padL(mAntesBA.trades,9) + padL(mAntesBA.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mAntesBA.totalReturnPct),14) + padL('-'+mAntesBA.maxDrawdownPct.toFixed(1)+'%',11) + padL(mAntesBA.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20) + padL(mReservadoBA.trades,9) + padL(mReservadoBA.winRatePct.toFixed(1)+'%',11) + padL(fmtPct(mReservadoBA.totalReturnPct),14) + padL('-'+mReservadoBA.maxDrawdownPct.toFixed(1)+'%',11) + padL(mReservadoBA.profitFactor.toFixed(2),10));
+
   console.log('\n=== Fin del backtest ===');
 }
 
