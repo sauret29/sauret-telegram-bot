@@ -2,7 +2,7 @@ name: El Cauto Temerario Live
 
 "on":
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '5,20,35,50 * * * *'   # desplazado 5 min para no chocar con los otros bots
   workflow_dispatch:
 
 permissions:
