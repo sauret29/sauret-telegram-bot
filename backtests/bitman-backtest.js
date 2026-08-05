@@ -3955,6 +3955,29 @@ async function main(){
     console.log('Diferencia entre la más alta y la más baja: ' + diferencia.toFixed(1) + ' puntos → ' + (esEstable ? 'ESTABLE' : 'INESTABLE'));
   }
 
+  // ---------- ANÁLISIS BJ: ¿son pocos disparos, o muchos disparos que no llegan a resolverse? ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS BJ — ¿El problema es pocos DISPAROS, o disparos que SÍ hay pero no resuelven dentro de la ventana?');
+  console.log('========================================');
+  console.log('Hasta ahora solo se mostraban las operaciones RESUELTAS (llegan a +2% o -2% en 40 velas). Aquí se');
+  console.log('desglosa también cuántas NO llegan a resolverse (el precio no se mueve lo suficiente en ningún');
+  console.log('sentido dentro de la ventana) — para saber si el cuello de botella es la señal o la propia carrera.');
+
+  console.log('\n' + pad('Ventana',9) + pad('Dir.',6) + padL('Disparos',10) + padL('Resueltos',11) + padL('Sin resolver',13) + padL('% sin resolver',15));
+  [4, 8, 12].forEach(ventanaHoras=>{
+    ['long','short'].forEach(direccion=>{
+      const disparoArr = new Array(s15MBH.n).fill(false);
+      for(let i=0;i<s15MBH.n;i++){
+        if(impulso15M_BI(s15MBH,i,direccion) && retrocesoRecienteEn1H_BI(i,direccion,ventanaHoras)) disparoArr[i]=true;
+      }
+      const resultados = carreraHaciaObjetivo(s15MBH, disparoArr, direccion, TARGET_PCT, STOP_PCT, MAX_BARS);
+      const sinResolver = resultados.filter(r=>r.resultado===null).length;
+      const resueltos = resultados.length - sinResolver;
+      const pctSinResolver = resultados.length ? (sinResolver/resultados.length*100) : NaN;
+      console.log(pad(ventanaHoras+'h',9) + pad(direccion==='long'?'Largo':'Corto',6) + padL(resultados.length,10) + padL(resueltos,11) + padL(sinResolver,13) + padL(isNaN(pctSinResolver)?'—':pctSinResolver.toFixed(1)+'%',15));
+    });
+  });
+
   console.log('\n=== Fin del backtest ===');
 }
 
