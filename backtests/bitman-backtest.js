@@ -3308,6 +3308,56 @@ async function main(){
     console.log('  #' + (idx+1) + ' (' + (o.direction==='long'?'COMPRA':'VENTA') + ', +' + o.equityChangePct.toFixed(1) + '%): semanal ' + (o.semanalCoincide?'SÍ coincidía':'no coincidía'));
   });
 
+  // ---------- ANÁLISIS AY: la combinación BBWP+ML RSI, aplicada a entradas de 1H (no 4H) ----------
+  console.log('\n\n========================================');
+  console.log('ANÁLISIS AY — La combinación BBWP≥90 + ML RSI, aplicada como filtro sobre entradas de 1H (confirmadas por 4H)');
+  console.log('========================================');
+  console.log('El 1H "en bruto" fallaba por exceso de comisiones (Análisis AA). Aquí se prueba si, exigiendo');
+  console.log('la misma combinación exigente que en el Análisis AW (esta vez calculada sobre el propio 1H),');
+  console.log('el 1H se queda solo con entradas de calidad suficiente para compensar esa desventaja.');
+
+  const filtroCombinado1H = (i, direction) => {
+    const b = s.bbwp[i];
+    if(isNaN(b)) return true;
+    const mlOk = direction==='long' ? mlSignal[i]==='Alcista' : mlSignal[i]==='Bajista';
+    return b>=90 && mlOk;
+  };
+
+  console.log('\n--- Comparación: 1H confirmado por 4H, sin filtro vs con el filtro combinado ---');
+  console.log(pad('Variante',24)+padL('Operac.',9)+padL('% Acierto',11)+padL('Retorno',12)+padL('Drawdown',11)+padL('P.Factor',10));
+  const r1HSinFiltro = simulateConfluenciaTPParcial(s, s4H, 3, LEVERAGE, 0.12, 1, 0.20, false);
+  const r1HConFiltro = simulateConfluenciaTPParcial(s, s4H, 3, LEVERAGE, 0.12, 1, 0.20, false, filtroCombinado1H);
+  console.log(pad('1H sin filtro',24)+padL(r1HSinFiltro.trades,9)+padL(r1HSinFiltro.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(r1HSinFiltro.totalReturnPct),12)+padL('-'+r1HSinFiltro.maxDrawdownPct.toFixed(1)+'%',11)+padL(r1HSinFiltro.profitFactor.toFixed(2),10));
+  console.log(pad('1H con filtro combinado',24)+padL(r1HConFiltro.trades,9)+padL(r1HConFiltro.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(r1HConFiltro.totalReturnPct),12)+padL('-'+r1HConFiltro.maxDrawdownPct.toFixed(1)+'%',11)+padL(r1HConFiltro.profitFactor.toFixed(2),10));
+  console.log('\n(referencia, misma configuración en 4H, Análisis AW): sin filtro 404 operac. +461.42% PF 2.13 · con filtro 120 operac. +92.36% PF 2.27');
+
+  console.log('\n--- Walk-forward año por año, 1H con el filtro combinado ---');
+  console.log(pad('Año',8)+padL('Operac.',9)+padL('% Acierto',11)+padL('Retorno',12)+padL('Drawdown',11)+padL('P.Factor',10));
+  const buckets1HComb = {};
+  r1HConFiltro.tradeLog.forEach(t=>{
+    const year = new Date(s.times[t.entryIdx]).getUTCFullYear();
+    if(!buckets1HComb[year]) buckets1HComb[year] = [];
+    buckets1HComb[year].push(t);
+  });
+  let aniosPositivos1HComb=0, aniosTotal1HComb=0;
+  Object.keys(buckets1HComb).map(Number).sort((a,b)=>a-b).forEach(year=>{
+    const m = metricsForTradeSubset(buckets1HComb[year]);
+    console.log(pad(String(year),8)+padL(m.trades,9)+padL(m.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(m.totalReturnPct),12)+padL('-'+m.maxDrawdownPct.toFixed(1)+'%',11)+padL(m.profitFactor.toFixed(2),10));
+    aniosTotal1HComb++;
+    if(m.totalReturnPct>0) aniosPositivos1HComb++;
+  });
+  console.log('Años con retorno positivo: ' + aniosPositivos1HComb + ' de ' + aniosTotal1HComb);
+
+  console.log('\n--- Validación fuera de muestra: últimos ' + MESES_RESERVADOS + ' meses reservados, 1H con filtro combinado ---');
+  const cutoffReservado1HComb = ohlcv.times[ohlcv.times.length-1] - MESES_RESERVADOS*30*86400000;
+  const tradesAntes1HComb = r1HConFiltro.tradeLog.filter(t => s.times[t.entryIdx] < cutoffReservado1HComb);
+  const tradesReservado1HComb = r1HConFiltro.tradeLog.filter(t => s.times[t.entryIdx] >= cutoffReservado1HComb);
+  const mAntes1HComb = metricsForTradeSubset(tradesAntes1HComb);
+  const mReservado1HComb = metricsForTradeSubset(tradesReservado1HComb);
+  console.log(pad('Tramo',20)+padL('Operac.',9)+padL('% Acierto',11)+padL('Retorno',12)+padL('Drawdown',11)+padL('P.Factor',10));
+  console.log(pad('Resto del histórico',20)+padL(mAntes1HComb.trades,9)+padL(mAntes1HComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mAntes1HComb.totalReturnPct),12)+padL('-'+mAntes1HComb.maxDrawdownPct.toFixed(1)+'%',11)+padL(mAntes1HComb.profitFactor.toFixed(2),10));
+  console.log(pad('TRAMO RESERVADO',20)+padL(mReservado1HComb.trades,9)+padL(mReservado1HComb.winRatePct.toFixed(1)+'%',11)+padL(fmtPct(mReservado1HComb.totalReturnPct),12)+padL('-'+mReservado1HComb.maxDrawdownPct.toFixed(1)+'%',11)+padL(mReservado1HComb.profitFactor.toFixed(2),10));
+
   console.log('\n=== Fin del backtest ===');
 }
 
