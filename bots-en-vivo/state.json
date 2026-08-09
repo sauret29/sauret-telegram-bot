@@ -5,13 +5,13 @@
       "W": "VENDER",
       "D": "ESPERAR",
       "H4": "ESPERAR",
-      "H1": "COMPRAR"
+      "H1": "ESPERAR"
     },
     "pro": {
       "W": "VENDER",
       "D": "ESPERAR",
       "H4": "ESPERAR",
-      "H1": "COMPRAR"
+      "H1": "ESPERAR"
     }
   },
   "warnings": {
@@ -20,5 +20,5 @@
     "H4": true,
     "H1": true
   },
-  "lastCheck": "2026-08-09T17:07:11.189Z"
+  "lastCheck": "2026-08-09T19:19:16.729Z"
 }
