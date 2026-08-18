@@ -5,7 +5,7 @@
       "W": "VENDER",
       "D": "ESPERAR",
       "H4": "COMPRAR",
-      "H1": "COMPRAR"
+      "H1": "ESPERAR"
     },
     "pro": {
       "W": "VENDER",
@@ -20,5 +20,5 @@
     "H4": false,
     "H1": true
   },
-  "lastCheck": "2026-08-18T18:02:50.308Z"
+  "lastCheck": "2026-08-18T19:39:50.213Z"
 }
