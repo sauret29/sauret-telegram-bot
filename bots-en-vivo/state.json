@@ -2,13 +2,13 @@
   "symbol": "BTCUSDT",
   "verdicts": {
     "base": {
-      "W": "VENDER",
+      "W": "ESPERAR",
       "D": "ESPERAR",
-      "H4": "ESPERAR",
+      "H4": "COMPRAR",
       "H1": "COMPRAR"
     },
     "pro": {
-      "W": "VENDER",
+      "W": "ESPERAR",
       "D": "ESPERAR",
       "H4": "ESPERAR",
       "H1": "ESPERAR"
@@ -17,8 +17,8 @@
   "warnings": {
     "W": true,
     "D": true,
-    "H4": true,
-    "H1": true
+    "H4": false,
+    "H1": false
   },
-  "lastCheck": "2026-08-19T14:06:13.799Z"
+  "lastCheck": "2026-08-19T15:50:37.778Z"
 }
