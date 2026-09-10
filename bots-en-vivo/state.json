@@ -17,8 +17,8 @@
   "warnings": {
     "W": true,
     "D": true,
-    "H4": true,
+    "H4": false,
     "H1": false
   },
-  "lastCheck": "2026-09-10T09:41:40.508Z"
+  "lastCheck": "2026-09-10T13:49:45.323Z"
 }
