@@ -3,6 +3,6 @@
   "entryPrice": 81425.23,
   "tpPrice": 83867.9869,
   "entryTime": 1789948800000,
-  "tpParcialHecho": false,
-  "lastProcessedTime": 1789948800000
+  "tpParcialHecho": true,
+  "lastProcessedTime": 1789977600000
 }
