@@ -1,8 +1,8 @@
 {
   "position": "long",
-  "entryPrice": 85256.01,
-  "tpPrice": 87813.6903,
-  "entryTime": 1791115200000,
+  "entryPrice": 85428,
+  "tpPrice": 87990.84,
+  "entryTime": 1791129600000,
   "tpParcialHecho": false,
-  "lastProcessedTime": 1791115200000
+  "lastProcessedTime": 1791129600000
 }
