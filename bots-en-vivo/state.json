@@ -3,22 +3,22 @@
   "verdicts": {
     "base": {
       "W": "COMPRAR",
-      "D": "VENDER",
-      "H4": "VENDER",
-      "H1": "VENDER"
+      "D": "COMPRAR",
+      "H4": "ESPERAR",
+      "H1": "ESPERAR"
     },
     "pro": {
       "W": "COMPRAR",
-      "D": "VENDER",
-      "H4": "VENDER",
-      "H1": "VENDER"
+      "D": "COMPRAR",
+      "H4": "ESPERAR",
+      "H1": "ESPERAR"
     }
   },
   "warnings": {
     "W": false,
-    "D": true,
+    "D": false,
     "H4": true,
-    "H1": false
+    "H1": true
   },
-  "lastCheck": "2026-10-06T07:06:34.452Z"
+  "lastCheck": "2026-10-06T14:10:16.313Z"
 }
