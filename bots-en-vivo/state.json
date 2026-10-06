@@ -4,21 +4,21 @@
     "base": {
       "W": "COMPRAR",
       "D": "COMPRAR",
-      "H4": "COMPRAR",
-      "H1": "VENDER"
+      "H4": "VENDER",
+      "H1": "ESPERAR"
     },
     "pro": {
       "W": "COMPRAR",
       "D": "COMPRAR",
-      "H4": "COMPRAR",
-      "H1": "VENDER"
+      "H4": "VENDER",
+      "H1": "ESPERAR"
     }
   },
   "warnings": {
     "W": false,
     "D": false,
-    "H4": false,
+    "H4": true,
     "H1": true
   },
-  "lastCheck": "2026-10-05T10:51:14.389Z"
+  "lastCheck": "2026-10-06T00:54:57.956Z"
 }
