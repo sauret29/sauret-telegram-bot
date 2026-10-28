@@ -3,13 +3,13 @@
   "verdicts": {
     "base": {
       "W": "ESPERAR",
-      "D": "VENDER",
+      "D": "ESPERAR",
       "H4": "ESPERAR",
       "H1": "VENDER"
     },
     "pro": {
       "W": "ESPERAR",
-      "D": "VENDER",
+      "D": "ESPERAR",
       "H4": "ESPERAR",
       "H1": "VENDER"
     }
@@ -20,5 +20,5 @@
     "H4": true,
     "H1": true
   },
-  "lastCheck": "2026-10-28T06:17:20.570Z"
+  "lastCheck": "2026-10-28T13:19:12.871Z"
 }
