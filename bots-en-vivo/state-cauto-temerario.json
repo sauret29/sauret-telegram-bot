@@ -1,8 +1,8 @@
 {
-  "position": null,
-  "entryPrice": null,
-  "tpPrice": null,
-  "entryTime": null,
+  "position": "short",
+  "entryPrice": 62747.22,
+  "tpPrice": 60864.8034,
+  "entryTime": 1795017600000,
   "tpParcialHecho": false,
-  "lastProcessedTime": 1795003200000
+  "lastProcessedTime": 1795017600000
 }
