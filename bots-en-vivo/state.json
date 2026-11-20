@@ -16,9 +16,9 @@
   },
   "warnings": {
     "W": true,
-    "D": false,
+    "D": true,
     "H4": false,
     "H1": true
   },
-  "lastCheck": "2026-11-19T23:22:56.675Z"
+  "lastCheck": "2026-11-20T04:08:00.115Z"
 }
